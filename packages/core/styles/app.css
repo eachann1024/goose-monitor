@@ -1,5 +1,19 @@
 /* ProcKill 应用外壳样式 —— 仅窗口/滚动条/字体级别，组件视觉全部用设计 token 的内联 style。 */
 * { box-sizing: border-box; }
+
+/* 原生感基线：系统控件默认禁用文本选中与元素拖拽，避免 WebView 暴露浏览器选区/拖影。
+   需要选中的内容（输入框、可复制文本）用 .selectable 或 input/textarea 放开。 */
+*, *::before, *::after {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+img, a { -webkit-user-drag: none; }
+input, textarea, [contenteditable="true"], .selectable {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 html, body { margin: 0; height: 100%; }
 body {
   background: var(--bg-app);

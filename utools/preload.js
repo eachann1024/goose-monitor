@@ -64,6 +64,97 @@ function isSystemPath(exe, name) {
     exe.startsWith("/System/Library") || exe.startsWith("/Library/");
 }
 
+/* ---- 真实应用图标抓取（与 Tauri src-tauri/src/icon.rs 同源逻辑的 Node 版）----
+   macOS：定位 .app bundle → 读 Info.plist 的 CFBundleIconFile（PlistBuddy）→ sips 转
+          64×64 PNG → base64 data URL，交前端 <img> 显示真实图标；失败缓存 null 降级字形方块。
+   Windows / Linux：暂未实现真实抓取，缓存 null 降级。
+   缓存按 bundle/exe 路径去重，含「已失败」负缓存，避免每次刷新重复跑 sips（开销大）。 */
+const fs = require("node:fs");
+const ICON_CACHE = new Map(); // path -> data URL | null（null=已尝试且失败）
+
+function bundleRootMac(p) {
+  if (!p) return null;
+  const idx = p.indexOf(".app/");
+  if (idx >= 0) return p.slice(0, idx + 4);
+  if (p.endsWith(".app")) return p;
+  return null;
+}
+
+// 在 bundle 内定位主图标 .icns：① 读 Info.plist 的 CFBundleIconFile；② 退化为 Resources 下第一个 .icns。
+async function locateIcns(bundle) {
+  const resources = path.join(bundle, "Contents/Resources");
+  const plist = path.join(bundle, "Contents/Info.plist");
+  if (fs.existsSync(plist)) {
+    try {
+      const name = (await shAsync("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleIconFile", plist], 1 << 20)).trim();
+      if (name) {
+        const fname = /\.icns$/i.test(name) ? name : name + ".icns";
+        const candidate = path.join(resources, fname);
+        if (fs.existsSync(candidate)) return candidate;
+      }
+    } catch (_) { /* 无该键或解析失败，走退化 */ }
+  }
+  try {
+    for (const f of fs.readdirSync(resources)) {
+      if (/\.icns$/i.test(f)) return path.join(resources, f);
+    }
+  } catch (_) { /* Resources 不存在 */ }
+  return null;
+}
+
+// 临时文件名唯一序号：缓存检查与抓取之间存在窗口，同一 icns 可能被并发抓取两次，
+// 唯一序号保证各写各的临时文件，避免并发 sips 写同一文件互相污染读到半截 PNG。
+let TMP_SEQ = 0;
+
+// 用系统 sips 把 .icns 转 64×64 PNG 临时文件，读回 base64（sips 不支持写 stdout）。
+async function icnsToDataUrl(icns) {
+  const tmp = path.join(os.tmpdir(), "prockill-icon-" + simpleHash(icns) + "-" + (TMP_SEQ++) + ".png");
+  try {
+    await shAsync("sips", ["-s", "format", "png", "-z", "64", "64", icns, "--out", tmp], 1 << 20);
+    const buf = fs.readFileSync(tmp);
+    return "data:image/png;base64," + buf.toString("base64");
+  } catch (_) {
+    return null;
+  } finally {
+    try { fs.unlinkSync(tmp); } catch (_) {}
+  }
+}
+
+function simpleHash(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+// 取一个应用路径的真实图标 data URL，命中缓存（含负缓存）即返回。失败返回 null。
+async function iconDataUrl(appPath) {
+  if (!appPath) return null;
+  if (ICON_CACHE.has(appPath)) return ICON_CACHE.get(appPath);
+  let result = null;
+  if (IS_MAC) {
+    const bundle = bundleRootMac(appPath);
+    if (bundle) {
+      const icns = await locateIcns(bundle);
+      if (icns) result = await icnsToDataUrl(icns);
+    }
+  }
+  // Windows 可用 win-icon-extractor，Linux 解析 .desktop + 主题图标（后续）。
+  ICON_CACHE.set(appPath, result);
+  return result;
+}
+
+// 给一批行并发补充真实图标（仅 GUI/非 sys 行；sys 行用字形方块即可）。
+// 已带缓存，重复刷新基本零开销；首轮并发抓取，单个失败不影响其它行。
+async function attachIcons(rows) {
+  if (!IS_MAC) return rows; // 目前仅 macOS 抓真实图标
+  await Promise.all(rows.map(async (r) => {
+    if (r.sys) return;
+    const url = await iconDataUrl(r.path);
+    if (url) r.iconUrl = url;
+  }));
+  return rows;
+}
+
 /* ---- 采集原始进程（异步，不阻塞事件循环）---- */
 async function rawProcsUnix() {
   // macOS 的 `-o comm=` 输出干净的完整可执行路径（含 .app/），单列即可。
@@ -205,7 +296,7 @@ async function listByCategory(category) {
       if (hit != null) { r.port = ports.get(hit); withPort.push(r); }
     }
     withPort.sort((a, b) => (+a.port) - (+b.port));
-    return withPort;
+    return await attachIcons(withPort);
   }
 
   if (category === "gui") {
@@ -216,10 +307,10 @@ async function listByCategory(category) {
     rows = rows.filter((r) => r.sys);
   } else if (category === "cpu") {
     rows.sort((a, b) => b.cpu - a.cpu);
-    return rows;
+    return await attachIcons(rows);
   }
   rows.sort((a, b) => b.mem - a.mem);
-  return rows;
+  return await attachIcons(rows);
 }
 
 // macOS 下 os.freemem() 不含可回收缓存，显示会几乎占满；改用 vm_stat 更准。
@@ -354,7 +445,7 @@ window.services = {
     if (typeof payload !== "string") return "";
     const text = payload.trim();
     // 与 plugin.json 中 prockill-search 的 regex 前缀保持一致
-    const m = text.match(/^(?:杀进程|结束进程|进程|prockill|pk|kill)[\s:：]+(\S.*)$/i);
+    const m = text.match(/^(?:杀进程|结束进程|进程|内存|prockill|pk|kill)[\s:：]+(\S.*)$/i);
     return (m ? m[1] : text).trim();
   }
 
