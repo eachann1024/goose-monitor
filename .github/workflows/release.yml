@@ -21,9 +21,10 @@ jobs:
           - platform: macos-latest
             args: "--target universal-apple-darwin"
             rust-targets: "aarch64-apple-darwin,x86_64-apple-darwin"
-          # Windows：MSVC 工具链由 runner 自带。
+          # Windows：MSVC 工具链由 runner 自带。只打 NSIS(.exe)——
+          # WiX/MSI 的 light.exe 无法处理中文产品名「鹅的监控」会链接失败，NSIS 不受影响。
           - platform: windows-latest
-            args: ""
+            args: "--bundles nsis"
             rust-targets: ""
           # Linux：Ubuntu 22.04（webkit2gtk-4.1）。
           - platform: ubuntu-22.04
