@@ -1,18 +1,22 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ProcKill",
+  "productName": "鹅的监控",
+  "mainBinaryName": "prockill",
   "version": "0.1.0",
   "identifier": "com.prockill.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://127.0.0.1:5173",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": "bun run dev",
+    "beforeBuildCommand": "bun run build"
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "ProcKill",
+        "label": "main",
+        "title": "鹅的监控",
         "width": 800,
         "height": 600,
         "minWidth": 640,
@@ -20,6 +24,21 @@
         "resizable": true,
         "fullscreen": false,
         "center": true
+      },
+      {
+        "label": "tray",
+        "url": "tray.html?popover=1",
+        "title": "鹅的监控 · 菜单栏",
+        "width": 384,
+        "height": 584,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false,
+        "shadow": false
       }
     ],
     "security": {
