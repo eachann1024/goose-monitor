@@ -1,6 +1,8 @@
-# ProcKill · 跨平台进程管理器
+# 鹅的监控 · 跨平台进程管理器
 
-键盘优先的「能结束进程的活动监视器」。一份前端，三处运行：**独立桌面应用（Tauri）**、**uTools 插件**、**浏览器预览**。完整复刻 `prockill-utools-design-system` 设计稿（紧凑专家版 + 行内进程树 + Helper 合并）。
+键盘优先的「能结束进程的活动监视器」。一份前端，三处运行：**独立桌面应用（Tauri）**、**uTools 插件**、**浏览器预览**。完整复刻 `prockill-design` 设计稿（紧凑专家版 + 行内进程树 + Helper 合并 + uTools 工具栈接入 + 菜单栏 popover）。
+
+> 内部标识符仍沿用 `prockill`（localStorage key、uTools 插件 id、Tauri identifier），仅展示名为「鹅的监控」。
 
 > 灵感来自 [fkill](https://github.com/sindresorhus/fkill)，是它的图形化、按应用分组的版本。视觉参考 macOS 活动监视器 × Raycast × Linear。
 
@@ -13,15 +15,34 @@
 - **键盘流**：`↑↓` 移动，`←→` 折叠/展开，`⏎` 结束进程，`⌘F` / `/` 搜索，`⌘R` 刷新。
 - **首杀确认**：首次按 `⏎` 弹确认框，含「以后不再提醒」复选框；勾选后后续直接结束。结束父进程会连带杀掉其所有合并的子进程（进程树）。
 
+### uTools 模式 · 接入工具栈
+
+- **全局唤起**：在 uTools 主输入框搜 `chrome` / `结束进程` / `内存` 等已注册关键词，鹅的监控作为工具栈命令浮现（关键词见 `utools/plugin.json` 的 `cmds`）。
+- **subInput 接管**：进入插件后，uTools 顶部输入框被 `utools.setSubInput` 接管为本插件搜索框（accent 高亮环 +「uTools 输入框已接管」标识）；全局搜索词自动带入（`setSubInputValue`）并实时展开过滤，命中子串用品牌色高亮。
+- 实现：`utools/preload.js` 注册 `onPluginEnter`（带词进入）+ `setSubInput`（实时过滤）；前端 `main.ts` 提供 `__prockillEnter` / `__prockillSubInput` 钩子，preload 与页面共享 `window`。
+
+### Tauri 模式 · 菜单栏（状态栏）popover
+
+macOS 状态栏图标下挂的 360px popover（无边框 / 透明 / 置顶 / 失焦自动收起），三种状态：
+
+- **默认弹层**：多选勾选 + 红色「结束所选 · N」批量结束 + 每行单独结束（电源键）+ 搜索框 + 底部「无操作自动收起」计时条。
+- **偏好设置**：*无操作自动收起* 分段控件（关闭 / 10s / 30s / 60s）、*自动清理*（空闲 > 30 分钟且 CPU < 1%）、结束前二次确认、开机自启。
+- **无操作倒计时**：列表变暗 + 环形「N 秒后自动收起 · 移动鼠标取消」+「保持打开」；倒计时结束调 `tray_collapse` 隐藏窗口。
+
+偏好用 `bridge.setPref` 持久化（`pk_tray_*`）；开机自启走 `tauri-plugin-autostart`（命令 `set_autostart`）。
+
 ## 架构
 
 「Core + Adapter」分层，同一份前端跑在不同宿主：
 
 ```
 packages/core/          共享前端（原生 TS，零框架运行时依赖）
+  index.html            主窗口入口
+  tray.html             菜单栏 popover 窗口入口（Tauri 用 ?popover=1 加载）
   src/
-    main.ts             主应用：渲染 + 键盘 + 轮询刷新
-    atoms.ts            UI 原子：AppIcon / Meter / Kbd
+    main.ts             主应用：渲染 + 键盘 + 轮询刷新 + uTools 接管钩子
+    tray.ts             菜单栏 popover：默认弹层 / 偏好设置 / 无操作倒计时三态
+    atoms.ts            UI 原子：AppIcon / Meter / Kbd / highlight
     shared.ts           分类/格式化/合并辅助（纯逻辑）
     icons.ts            内联 Lucide SVG
     bridge/
@@ -31,14 +52,15 @@ packages/core/          共享前端（原生 TS，零框架运行时依赖）
       browser.ts        浏览器 mock（假数据 + 假关闭，用于预览）
   styles/
     tokens.css          设计 token（深/浅主题，来自设计稿）
-    app.css             窗口/滚动条/动画
+    app.css             主窗口外壳：窗口/滚动条/动画
+    tray.css            菜单栏 popover 外壳：透明窗 / 桌面场景预览 / 动画
 
 src-tauri/              Tauri 后端（Rust）
   src/
     process.rs          sysinfo 枚举 + Helper 合并 + 系统资源
     kill.rs             kill_tree 杀进程树
     icon.rs             图标抓取（预留接口）
-    lib.rs              Tauri 命令 + 常驻 System 后台刷新线程
+    lib.rs              Tauri 命令 + 常驻 System 后台刷新线程 + 菜单栏 tray 图标/popover/自启
 
 utools/                 uTools 适配
   preload.js            Node 实现进程枚举/合并/kill（ps / PowerShell / pkill / taskkill）
@@ -52,18 +74,31 @@ scripts/build-utools.mjs   组装 uTools 插件目录 utools-dist/
 ## 开发 / 构建
 
 ```bash
-npm install
+bun install
 
 # 1) 浏览器预览（mock 数据，可演示全部交互）
-npm run dev                 # → http://127.0.0.1:5173  （?full=1 铺满，?boxed=1 强制窗框）
+bun run dev                 # → http://127.0.0.1:5173  （?full=1 铺满，?boxed=1 强制窗框）
+                            #   菜单栏 popover 预览：http://127.0.0.1:5173/tray.html（含桌面场景）
 
 # 2) 独立桌面应用（Tauri，真实进程 + 真实 kill）
-npm run tauri:dev           # 开发
-npm run tauri:build         # 出安装包（.dmg / .msi / .deb / .AppImage）
+bun run tauri:dev           # 开发
 
 # 3) uTools 插件
-npm run utools:build        # → utools-dist/，在 uTools 开发者工具按目录加载，或打包 .upx
+bun run build:utools        # → utools-dist/，在 uTools 开发者工具按目录加载，或打包 .upx
 ```
+
+### 出安装包（按宿主平台）
+
+Tauri 原生包依赖各自 OS 的打包工具链，**无法跨 OS 交叉编译**，须在对应系统（或 CI runner）上构建。
+每条命令带平台守卫，在错误宿主上会直接报错退出并给出指引：
+
+```bash
+bun run build:mac           # 在 macOS 上 → .app / .dmg
+bun run build:win           # 在 Windows 上 → .msi / .exe (NSIS)
+bun run build:linux         # 在 Linux  上 → .AppImage / .deb / .rpm
+```
+
+发布全平台包：在 GitHub Actions 用 macOS / windows / linux 三个 runner 分别跑对应命令，再汇总产物（本地单机只能产出当前系统的包）。
 
 ## 平台说明
 
@@ -72,7 +107,10 @@ npm run utools:build        # → utools-dist/，在 uTools 开发者工具按�
 | 进程枚举 | sysinfo | `ps`(mac/Linux) / PowerShell(Win) |
 | CPU% | sysinfo 连续采样（准确） | `ps %cpu` / 负载估算 |
 | 杀进程树 | kill_tree（Win 用 Win32 API） | `pkill -P` + SIGKILL / `taskkill /T /F` |
-| 图标 | 预留（NSWorkspace / win-icon-extractor） | 可用 Electron nativeImage |
+| 图标 | sips(mac) / PowerShell+System.Drawing(Win) / hicolor 主题(Linux) | 可用 Electron nativeImage |
 | 偏好持久化 | localStorage | `utools.dbStorage` |
+| 菜单栏 popover | tray-icon + 隐藏 tray 窗口 | —（uTools 用工具栈接入替代） |
+| 工具栈 / 全局搜索 | —（独立窗口） | `onPluginEnter` + `setSubInput` 接管 |
+| 开机自启 | `tauri-plugin-autostart` | uTools 宿主管理 |
 
 uTools preload 运行在 Node 16 CommonJS，源码保持可读（uTools 审核要求，不混淆）。
