@@ -10,18 +10,20 @@ fn main() {
     let mut sys = process::new_system();
     thread::sleep(process::MINIMUM_CPU_UPDATE_INTERVAL);
     process::refresh(&mut sys);
+    let mut idle = process::IdleTracker::new();
+    idle.update(&sys);
 
-    let rows = process::list_by_category(&sys, "all");
+    let rows = process::list_by_category(&sys, &idle, "all");
     let row = rows.into_iter().find(|r| !r.helpers.is_empty()).unwrap_or_else(|| {
         // 没有多进程组时取第一个
-        process::list_by_category(&sys, "all").into_iter().next().expect("有进程")
+        process::list_by_category(&sys, &idle, "all").into_iter().next().expect("有进程")
     });
     let row_json = serde_json::to_value(&row).unwrap();
     let stats_json = serde_json::to_value(&process::system_stats(&sys)).unwrap();
     let kill_json = serde_json::to_value(&kill::KillResult { ok: true, killed: vec![1, 2], error: None }).unwrap();
 
     // 前端 AppRow 期望的字段
-    let row_need = ["id", "name", "monogram", "color", "procs", "cpu", "mem", "pid", "path", "helpers", "allPids"];
+    let row_need = ["id", "name", "monogram", "color", "procs", "cpu", "mem", "pid", "path", "helpers", "allPids", "idleMinutes"];
     let stats_need = ["cpuPercent", "memUsedMb", "memTotalMb"];
     let kill_need = ["ok", "killed"];
 

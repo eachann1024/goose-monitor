@@ -8,9 +8,11 @@ fn main() {
     let mut sys = process::new_system();
     thread::sleep(process::MINIMUM_CPU_UPDATE_INTERVAL);
     process::refresh(&mut sys);
-    let all = process::list_by_category(&sys, "all");
-    let gui = process::list_by_category(&sys, "gui");
-    let bg = process::list_by_category(&sys, "bg");
+    let mut idle = process::IdleTracker::new();
+    idle.update(&sys);
+    let all = process::list_by_category(&sys, &idle, "all");
+    let gui = process::list_by_category(&sys, &idle, "gui");
+    let bg = process::list_by_category(&sys, &idle, "bg");
     println!("全部组={} GUI={} 后台={}", all.len(), gui.len(), bg.len());
     let s = process::system_stats(&sys);
     println!("系统 CPU {:.1}%  内存 {:.0}/{:.0}MB", s.cpu_percent, s.mem_used_mb, s.mem_total_mb);
