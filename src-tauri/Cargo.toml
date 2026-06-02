@@ -1,0 +1,29 @@
+[package]
+name = "prockill"
+version = "0.1.0"
+description = "ProcKill — 跨平台进程管理器"
+authors = ["ProcKill"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "prockill_lib"
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = "0.33"
+kill_tree = { version = "0.2", features = ["blocking"] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

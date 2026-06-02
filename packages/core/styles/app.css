@@ -1,0 +1,63 @@
+/* ProcKill 应用外壳样式 —— 仅窗口/滚动条/字体级别，组件视觉全部用设计 token 的内联 style。 */
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg-app);
+  font-family: var(--font-sans);
+  color: var(--fg-1);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+#app { height: 100%; }
+
+/* 整窗布局：独立窗口/uTools 窗口里铺满；浏览器预览时居中显示 800×600 框 */
+.win {
+  width: 100%;
+  height: 100%;
+  background: var(--bg-app);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* 浏览器/uTools 预览态：把窗口约束成 800×600 居中并带窗体阴影 */
+body.boxed { background: #0c0d10; display: grid; place-items: center; }
+body.boxed #app { height: auto; }
+body.boxed .win {
+  width: 800px;
+  height: 600px;
+  border-radius: var(--r-window);
+  overflow: hidden;
+  box-shadow: var(--shadow-window);
+}
+
+/* 自定义滚动条 —— 复刻设计稿 */
+.scroll { overflow-y: auto; scrollbar-width: thin; scrollbar-color: #33363d transparent; }
+.scroll::-webkit-scrollbar { width: 8px; }
+.scroll::-webkit-scrollbar-thumb {
+  background: #2c2f36; border-radius: 99px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+[data-theme="light"] .scroll { scrollbar-color: #c8ccd2 transparent; }
+[data-theme="light"] .scroll::-webkit-scrollbar-thumb { background: #c8ccd2; }
+
+button { font-family: inherit; }
+input { font-family: inherit; }
+
+/* Helper 子进程行背景 —— 深主题压暗，浅主题轻微加灰，避免硬编码 rgba(0,0,0) 在浅色下突兀 */
+[data-theme="dark"] { --bg-helper-row: rgba(0,0,0,0.16); }
+[data-theme="light"] { --bg-helper-row: rgba(0,0,0,0.035); }
+
+/* 分类切换 / 排序变化的轻量交叉淡入 —— 设计稿要求 ~120ms */
+.fade-in { animation: pkFade 120ms cubic-bezier(.2,.7,.3,1); }
+@keyframes pkFade { from { opacity: 0; } to { opacity: 1; } }
+
+/* meter 宽度动画 */
+.meter-fill { transition: width 200ms ease-out; }
+
+/* 确认弹窗动画 */
+.scrim { animation: scrimIn 140ms ease-out; }
+@keyframes scrimIn { from { opacity: 0; } to { opacity: 1; } }
+.dialog-card { animation: dialogIn 140ms cubic-bezier(.2,.7,.3,1); }
+@keyframes dialogIn { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: scale(1); } }
