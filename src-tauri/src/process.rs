@@ -5,7 +5,54 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Instant;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+
+/// 低占用阈值：CPU 严格低于此值视为「空闲」。
+const IDLE_CPU_THRESHOLD: f32 = 1.0;
+
+/// 进程空闲时长追踪器：记录每个 pid 自上次「活跃（CPU>=阈值）」以来的起点。
+/// 由后台刷新线程每秒调一次 `update`；`idle_minutes` 查询某 pid 已空闲多久。
+/// pid 复用风险可接受：复用后 CPU 一旦活跃即清零，最坏只是少清理一轮。
+#[derive(Default)]
+pub struct IdleTracker {
+    /// pid -> 进入低占用的起始时刻（仍处于低占用才有值）。
+    since: HashMap<u32, Instant>,
+}
+
+impl IdleTracker {
+    pub fn new() -> Self {
+        Self { since: HashMap::new() }
+    }
+
+    /// 用最新一轮进程快照推进空闲计时：
+    /// - CPU < 阈值且此前无记录 → 记下当前时刻为空闲起点；
+    /// - CPU >= 阈值 → 移除记录（重新活跃）；
+    /// - 已消失的 pid → 清理。
+    pub fn update(&mut self, sys: &System) {
+        let now = Instant::now();
+        let mut alive: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for (pid, p) in sys.processes() {
+            let id = pid.as_u32();
+            alive.insert(id);
+            if p.cpu_usage() < IDLE_CPU_THRESHOLD {
+                self.since.entry(id).or_insert(now);
+            } else {
+                self.since.remove(&id);
+            }
+        }
+        // 清掉已退出的进程，避免 map 无限增长
+        self.since.retain(|pid, _| alive.contains(pid));
+    }
+
+    /// 某 pid 已连续空闲的分钟数（无记录即 0）。
+    pub fn idle_minutes(&self, pid: u32) -> f64 {
+        match self.since.get(&pid) {
+            Some(t) => t.elapsed().as_secs_f64() / 60.0,
+            None => 0.0,
+        }
+    }
+}
 
 /// 子进程明细（合并展示用）。
 #[derive(Serialize, Clone)]
@@ -38,6 +85,10 @@ pub struct AppRow {
     pub all_pids: Vec<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<String>,
+    /// 该进程组连续低占用（CPU<1%）的累计分钟数。供「自动清理」判断空闲时长。
+    /// 取组内成员中最小者（任一成员活跃即视为整组未空闲），保守不误伤。
+    #[serde(rename = "idleMinutes")]
+    pub idle_minutes: f64,
 }
 
 #[derive(Serialize, Clone)]
@@ -163,7 +214,14 @@ fn app_bundle(exe: &str) -> Option<(String, String)> {
 /// 判断是否界面应用（在 .app bundle 内 / Program Files / Electron app 目录 / Linux 应用目录）。
 fn is_gui(exe: &str) -> bool {
     if exe.contains(".app/") || exe.ends_with(".app") {
-        return true;
+        // macOS 大量系统守护进程也住在 .app bundle 内（如 XProtect、liquiddetectiond、
+        // AccessibilityVisualsAgent），但它们装在 /System/ 或 /Library/ 下，并非用户应用。
+        // 仅凭 .app 会把它们误判为界面应用 → 进入 gui 列表 → 被自动清理误杀。
+        // 故系统/库目录下的 .app 一律不算用户 GUI 应用，交回 is_system_path 标记为系统进程。
+        let in_system_dir = exe.starts_with("/System/")
+            || exe.starts_with("/Library/")
+            || exe.starts_with("/usr/");
+        return !in_system_dir;
     }
     if cfg!(target_os = "windows") {
         let low = exe.to_lowercase();
@@ -229,7 +287,8 @@ fn collect_raw(sys: &System) -> Vec<RawProc> {
 }
 
 /// 把原始进程合并为按"应用"分组的 AppRow 列表。
-fn merge(raw: &[RawProc]) -> Vec<AppRow> {
+/// `idle` 用于给每组算空闲时长（组内成员最小者，保守）。
+fn merge(raw: &[RawProc], idle: &IdleTracker) -> Vec<AppRow> {
     // 分组键：界面进程按 .app bundle；否则按 exe 路径（同一可执行的多实例合并）；
     // 都没有则按进程名。
     struct Group {
@@ -280,6 +339,13 @@ fn merge(raw: &[RawProc]) -> Vec<AppRow> {
         let total_mem: f64 = members.iter().map(|m| m.mem_mb).sum();
         let all_pids: Vec<u32> = members.iter().map(|m| m.pid).collect();
 
+        // 组空闲时长 = 组内成员最小空闲（任一成员活跃则整组按其计，保守不误伤）。
+        let idle_minutes = members
+            .iter()
+            .map(|m| idle.idle_minutes(m.pid))
+            .fold(f64::INFINITY, f64::min);
+        let idle_minutes = if idle_minutes.is_finite() { idle_minutes } else { 0.0 };
+
         // helpers 仅在多进程时构建
         let helpers: Vec<Helper> = if members.len() > 1 {
             members
@@ -318,6 +384,7 @@ fn merge(raw: &[RawProc]) -> Vec<AppRow> {
             icon_url: None,
             all_pids,
             port: None,
+            idle_minutes,
         });
         let _ = g.is_gui;
         let _ = g.key;
@@ -371,17 +438,19 @@ fn listen_ports() -> HashMap<u32, String> {
 }
 
 /// 按分类过滤 + 排序裁剪。
-pub fn list_by_category(sys: &System, category: &str) -> Vec<AppRow> {
+pub fn list_by_category(sys: &System, idle: &IdleTracker, category: &str) -> Vec<AppRow> {
     let raw = collect_raw(sys);
-    let mut rows = merge(&raw);
+    let mut rows = merge(&raw, idle);
 
     match category {
         "gui" => {
-            // 用语义判断：界面应用 = 路径像界面应用 且 非系统进程
-            rows.retain(|r| (is_gui(&r.path) || r.path.contains(".app")) && !r.sys.unwrap_or(false));
+            // 用语义判断：界面应用 = 路径像界面应用 且 非系统进程。
+            // 注意不要再额外 `|| path.contains(".app")`——系统守护进程也住在 .app 内，
+            // is_gui 已据系统目录把它们排除，绕过去会把它们漏回 gui 列表。
+            rows.retain(|r| is_gui(&r.path) && !r.sys.unwrap_or(false));
             // 平台拿不到可靠路径时（如部分 Linux），退化为非系统进程
             if rows.is_empty() {
-                rows = merge(&raw);
+                rows = merge(&raw, idle);
                 rows.retain(|r| !r.sys.unwrap_or(false));
             }
             rows.sort_by(|a, b| b.mem.partial_cmp(&a.mem).unwrap_or(std::cmp::Ordering::Equal));

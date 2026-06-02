@@ -1,0 +1,94 @@
+/* 菜单栏（状态栏）模式外壳样式 —— 复刻设计稿 v8_tray 的 TrayScene。
+   组件视觉全部用设计 token 的内联 style；这里只管窗口/场景级别。
+
+   两种呈现：
+   - Tauri popover 窗口：背景透明，仅 .tray-popover 卡片可见，从状态栏图标下挂。
+   - 浏览器预览（?preview=1）：渲染完整 TrayScene（桌面墙纸 + 菜单栏 + 箭头 + popover）居中演示。 */
+* { box-sizing: border-box; }
+
+/* 原生感基线：popover 里禁用文本选中与元素拖拽（详见 app.css 注释）。 */
+*, *::before, *::after {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+img, a { -webkit-user-drag: none; }
+input, textarea, [contenteditable="true"], .selectable {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+html, body { margin: 0; height: 100%; }
+body {
+  font-family: var(--font-sans);
+  color: var(--fg-1);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* 默认（Tauri popover）：透明，让卡片自带圆角阴影浮在系统之上 */
+  background: transparent;
+}
+#tray { height: 100%; }
+
+/* ---- Tauri popover 态：窗口透明，卡片浮在系统之上（圆角 + 阴影）----
+   #tray 留出透明内边距，让卡片的圆角和投影不被窗口边缘裁切。
+   窗口尺寸（tauri.conf.json tray.width/height）已含这圈 padding 的余量。 */
+body.popover #tray {
+  height: 100%;
+  padding: 10px 12px 14px;          /* 上 / 左右 / 下：下方留多一点给箭头落点与投影 */
+}
+body.popover .tray-popover {
+  width: 100%;
+  height: 100%;
+  border-radius: 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-1);
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+}
+
+/* ---- 浏览器预览态：完整桌面场景 ---- */
+body.preview {
+  display: grid;
+  place-items: center;
+}
+body.preview .tray-scene {
+  position: relative;
+  width: 720px;
+  height: 640px;
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: var(--shadow-window);
+}
+/* 预览态卡片：固定宽度，落在桌面场景的状态栏下方（定位由 JS 设 top/right）。 */
+body.preview .tray-popover {
+  width: 360px;
+  border-radius: 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-1);
+  box-shadow: var(--shadow-pop);
+}
+/* 预览态卡片高度自适应内容：列表区限高，避免无限长。
+   popover 态（固定窗口高度）则交给 flex:1 撑满，footer 始终贴底，不露卡片底色。 */
+body.preview .tray-listbox { max-height: 360px; }
+
+/* 自定义滚动条 —— 与主应用一致 */
+.tray-scroll { overflow-y: auto; scrollbar-width: thin; scrollbar-color: #33363d transparent; }
+.tray-scroll::-webkit-scrollbar { width: 7px; }
+.tray-scroll::-webkit-scrollbar-thumb {
+  background: #2c2f36; border-radius: 99px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+[data-theme="light"] .tray-scroll { scrollbar-color: #c8ccd2 transparent; }
+[data-theme="light"] .tray-scroll::-webkit-scrollbar-thumb { background: #c8ccd2; }
+
+button { font-family: inherit; }
+input { font-family: inherit; }
+
+/* popover 进入动画（从顶部展开） */
+.tray-popover { animation: trayIn 150ms cubic-bezier(.2,.7,.3,1); transform-origin: top center; }
+@keyframes trayIn { from { opacity: 0; transform: translateY(-6px) scale(.98); } to { opacity: 1; transform: none; } }
+
+/* 视图切换交叉淡入 */
+.tray-fade { animation: trayFade 120ms cubic-bezier(.2,.7,.3,1); }
+@keyframes trayFade { from { opacity: 0; } to { opacity: 1; } }

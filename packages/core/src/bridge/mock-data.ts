@@ -74,11 +74,15 @@ function buildRow(seed: Seed): AppRow {
     ? helpers.reduce((a, h) => a + h.mem, 0)
     : Math.round(jitter(seed.memBase, 0.04, 1e9));
   const procs = helpers.length || 1;
+  // 模拟空闲时长：低占用（CPU<1%）的应用给一个较大的空闲分钟数，便于演示「自动清理」；
+  // 其余视为活跃（0）。真实环境由 Rust IdleTracker 提供。
+  const idleMinutes = cpu < 1 ? 35 + Math.round(Math.random() * 40) : 0;
   return {
     id: seed.id, name: seed.name, monogram: seed.monogram, color: seed.color,
     procs, cpu, mem, pid: seed.pid, path: seed.path, helpers,
     sys: seed.sys, port: seed.port,
     allPids: [seed.pid, ...helpers.map((h) => h.pid)],
+    idleMinutes,
   };
 }
 

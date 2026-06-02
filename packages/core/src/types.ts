@@ -39,6 +39,8 @@ export interface AppRow {
   iconUrl?: string;
   /** 合并组下所有 PID，kill 时需要。 */
   allPids?: number[];
+  /** 连续低占用（CPU<1%）累计分钟数，供菜单栏「自动清理」判断空闲时长。 */
+  idleMinutes?: number;
 }
 
 export type CategoryId = "gui" | "all" | "cpu" | "mem" | "net" | "bg";
