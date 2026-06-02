@@ -12,7 +12,26 @@ permissions:
   contents: write
 
 jobs:
+  # 前置清理：删掉同名 tag 的旧 draft Release，让三平台从干净状态全新上传，
+  # 避免重跑时 tauri-action 撞 ReleaseAsset already_exists（它不覆盖同名 asset）。
+  cleanup:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete existing draft release for this tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" --yes --cleanup-tag=false || true
+
   build:
+    needs: cleanup
+    # cleanup 仅在 tag 触发时跑；手动触发(workflow_dispatch)时 cleanup 被 skip，
+    # build 不能因依赖被跳过而连带跳过，故 always() + 放行 skipped。
+    if: always() && (needs.cleanup.result == 'success' || needs.cleanup.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
