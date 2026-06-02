@@ -11,6 +11,23 @@ export const CATEGORIES: Category[] = [
   { id: "bg", label: "后台服务", icon: "server", key: "6" },
 ];
 
+/** 运行平台（WebView 下 userAgent 可靠：Tauri/uTools 均基于系统 WebView）。 */
+export type Platform = "mac" | "win" | "linux";
+
+export const platform: Platform = (() => {
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  if (/Mac|iPhone|iPad/i.test(ua)) return "mac";
+  if (/Win/i.test(ua)) return "win";
+  return "linux";
+})();
+
+/** 主修饰键字形：mac 用 ⌘，Windows/Linux 用 Ctrl（各自键盘上的实际按键）。 */
+export const modKeyLabel: string = platform === "mac" ? "⌘" : "Ctrl";
+
+/** 判断键盘事件是否按下了本平台的主修饰键。 */
+export const isModKey = (e: KeyboardEvent | MouseEvent): boolean =>
+  platform === "mac" ? e.metaKey : e.ctrlKey;
+
 /** 内存格式化：<1024MB 显示 MB，否则 GB（两位小数）。 */
 export const fmtMem = (mb: number): string =>
   mb >= 1024 ? (mb / 1024).toFixed(2) + " GB" : Math.round(mb) + " MB";

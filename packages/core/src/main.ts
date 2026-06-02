@@ -9,7 +9,7 @@
 import "./styles_guard";
 import { detectBridge, type PlatformBridge } from "./bridge";
 import type { AppRow, CategoryId, SystemStats } from "./types";
-import { CATEGORIES, fmtMem, fmtCpu } from "./shared";
+import { CATEGORIES, fmtMem, fmtCpu, modKeyLabel, isModKey } from "./shared";
 import { icon } from "./icons";
 import { appIcon, meter, kbd, h, highlight } from "./atoms";
 // 应用品牌图标（鹅的监控）——vite 处理为可用 URL，用于 uTools 插件标签等品牌位
@@ -65,6 +65,9 @@ class ProcKillApp {
   private root: HTMLElement;
   private s: State;
   private refreshTimer: number | null = null;
+  // 仅在用户主动改变选中项（键盘上下导航）时置 true，updateList 据此把选中项滚入视野一次。
+  // 轮询刷新不置位 → 不会在用户下滑时把列表强行拉回顶部。
+  private pendingScrollToSel = false;
   // 请求序号：每次发起 load/polling 自增并捕获当时的分类，返回时校验仍是最新请求且分类未变，
   // 否则丢弃——防止快速切分类时较慢的旧请求乱序返回，把旧分类数据写进当前分类标题下。
   private loadSeq = 0;
@@ -83,6 +86,8 @@ class ProcKillApp {
   private sortBtn!: HTMLElement;
   private sortMenuWrap!: HTMLElement;
   private sideNavBtns: Record<string, { btn: HTMLElement; icon: HTMLElement; label: HTMLElement }> = {};
+  // 分类快捷键角标：默认隐藏，按住主修饰键（mac=⌘ / win·linux=Ctrl）时整体显示。
+  private navKbds: HTMLElement[] = [];
   private cpuBarFill!: HTMLElement; private cpuBarVal!: HTMLElement;
   private memBarFill!: HTMLElement; private memBarVal!: HTMLElement;
   private searchBar!: HTMLElement;
@@ -350,9 +355,19 @@ class ProcKillApp {
   }
 
   // ---------- 键盘 ----------
+  /** 按住主修饰键时显示分类角标，松开/失焦时隐藏。 */
+  private setNavKbdVisible(on: boolean): void {
+    for (const k of this.navKbds) k.style.visibility = on ? "visible" : "hidden";
+  }
+
   private installKeys(): void {
+    // 修饰键按下/松开切换角标显隐；窗口失焦兜底复位，防止角标卡在显示态。
+    window.addEventListener("keydown", (e) => { if (isModKey(e)) this.setNavKbdVisible(true); });
+    window.addEventListener("keyup", (e) => { if (!isModKey(e)) this.setNavKbdVisible(false); });
+    window.addEventListener("blur", () => this.setNavKbdVisible(false));
+
     window.addEventListener("keydown", (e) => {
-      const mod = e.metaKey || e.ctrlKey;
+      const mod = isModKey(e);
       const s = this.s;
       if (s.dialogApp) {
         const dlg = s.dialogApp;
@@ -383,10 +398,12 @@ class ProcKillApp {
       if (e.key === "ArrowDown") {
         e.preventDefault();
         s.sel = Math.min(v.length - 1, s.sel + 1);
+        this.pendingScrollToSel = true;
         this.update();
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         s.sel = Math.max(0, s.sel - 1);
+        this.pendingScrollToSel = true;
         this.update();
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
@@ -593,9 +610,16 @@ class ProcKillApp {
     aside.appendChild(h("div", { className: "t-label", style: { padding: "6px 8px 8px" }, text: "分类" }));
 
     const navWrap = h("div", { style: { display: "flex", flexDirection: "column", gap: "1px" } });
+    this.navKbds = [];
+    // mac 角标紧凑（⌘1），win/linux 文字较宽（Ctrl1）需放宽。
+    const kbdWide = modKeyLabel !== "⌘";
     for (const c of CATEGORIES) {
       const ico = icon(c.icon, 15, { color: "var(--fg-3)" } as any);
       const label = h("span", { style: { font: "var(--t-base)", flex: "1", color: "var(--fg-2)" }, text: c.label });
+      const key = kbd(`${modKeyLabel}${c.key}`, kbdWide);
+      // 默认隐藏：保留占位（visibility）避免按住修饰键时布局抖动。
+      key.style.visibility = "hidden";
+      this.navKbds.push(key);
       const btn = h("button", {
         style: {
           display: "flex", alignItems: "center", gap: "9px", height: "32px",
@@ -607,7 +631,7 @@ class ProcKillApp {
           mouseenter: () => { if (c.id !== s.cat) btn.style.background = "var(--bg-row-hover)"; },
           mouseleave: () => { if (c.id !== s.cat) btn.style.background = "transparent"; },
         },
-        children: [ico, label, kbd(`⌘${c.key}`)],
+        children: [ico, label, key],
       });
       this.sideNavBtns[c.id] = { btn, icon: ico as any, label };
       navWrap.appendChild(btn);
@@ -929,13 +953,19 @@ class ProcKillApp {
       prev = ref.wrap;
     });
 
-    // 把选中项滚入视野（仅在需要时滚动，不强制归零）
-    const sel = this.selApp;
-    const el = sel && this.rows.get(sel.id)?.row;
+    // 把选中项滚入视野：仅在用户主动改变选中项时滚动一次。
+    // 否则轮询刷新会反复把默认选中的首项滚回顶部，打断用户下滑浏览。
+    const sel = this.pendingScrollToSel ? this.selApp : null;
+    this.pendingScrollToSel = false;
+    const el = sel && this.rows.get(sel.id)?.wrap;
     if (el) {
-      const top = el.offsetTop;
-      const bottom = top + el.offsetHeight;
       const cont = this.scroll;
+      // 用 getBoundingClientRect 相对容器算偏移，避免依赖 offsetParent 链
+      // （wrap/scroll 无定位时 offsetTop 会把 header 等高度算进去，导致滚动错位）。
+      const rRect = el.getBoundingClientRect();
+      const cRect = cont.getBoundingClientRect();
+      const top = rRect.top - cRect.top + cont.scrollTop;
+      const bottom = top + rRect.height;
       if (top < cont.scrollTop) cont.scrollTop = top - 8;
       else if (bottom > cont.scrollTop + cont.clientHeight)
         cont.scrollTop = bottom - cont.clientHeight + 8;
