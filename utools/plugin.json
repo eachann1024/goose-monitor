@@ -1,0 +1,31 @@
+{
+  "name": "prockill",
+  "pluginName": "ProcKill 进程管理器",
+  "description": "界面化的进程管理器：界面应用/进程列表、Helper 合并、键盘流结束进程",
+  "author": "ProcKill",
+  "homepage": "https://github.com/",
+  "version": "0.1.0",
+  "logo": "logo.png",
+  "main": "index.html",
+  "preload": "preload.js",
+  "features": [
+    {
+      "code": "prockill",
+      "explain": "打开 ProcKill 进程管理器",
+      "cmds": ["prockill", "进程", "进程管理", "进程管理器", "结束进程", "杀进程", "任务管理器", "pk", "kill"]
+    },
+    {
+      "code": "prockill-search",
+      "explain": "在 ProcKill 中搜索并结束进程（带关键词进入）",
+      "cmds": [
+        {
+          "type": "regex",
+          "label": "ProcKill 搜索进程",
+          "match": "/^(?:杀进程|结束进程|进程|prockill|pk|kill)[\\s:：]+\\S.*$/i",
+          "minLength": 2,
+          "maxLength": 200
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "prockill",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "ProcKill — 跨平台进程管理器，支持 Tauri 桌面应用与 uTools 插件",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "utools:build": "vite build --mode utools && node scripts/build-utools.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0",
+    "vite": "^6.0.3"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.1.1"
+  }
+}
