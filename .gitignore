@@ -6,5 +6,8 @@ src-tauri/gen/
 *.log
 .DS_Store
 
+# 项目统一用 bun：追踪 bun.lock（覆盖全局 *.lock 忽略），不用 npm lockfile
+!bun.lock
+
 # 本地工作汇报，不纳入版本控制
 CHANGELOG.md
