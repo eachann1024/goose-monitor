@@ -6,7 +6,10 @@
   "description": "ProcKill — 跨平台进程管理器，支持 Tauri 桌面应用与 uTools 插件",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build --mode utools && node scripts/build-utools.mjs",
+    "mac": "node scripts/guard-platform.mjs darwin && tauri build",
+    "win": "node scripts/guard-platform.mjs win32 && tauri build",
+    "linux": "node scripts/guard-platform.mjs linux && tauri build",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

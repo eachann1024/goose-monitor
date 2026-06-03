@@ -25,25 +25,24 @@ body {
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  /* 默认（Tauri popover）：透明，让卡片自带圆角阴影浮在系统之上 */
+  /* 默认（Tauri popover）：透明，让卡片只保留自身圆角和 hairline。 */
   background: transparent;
 }
 #tray { height: 100%; }
 
-/* ---- Tauri popover 态：窗口透明，卡片浮在系统之上（圆角 + 阴影）----
-   #tray 留出透明内边距，让卡片的圆角和投影不被窗口边缘裁切。
-   窗口尺寸（tauri.conf.json tray.width/height）已含这圈 padding 的余量。 */
+/* ---- Tauri popover 态：窗口透明，卡片贴近系统菜单栏下挂。----
+   设计稿图二没有额外外发光/厚投影；阴影交给系统窗口或背景层，卡片只画一条克制边线。 */
 body.popover #tray {
   height: 100%;
-  padding: 10px 12px 14px;          /* 上 / 左右 / 下：下方留多一点给箭头落点与投影 */
+  padding: 0;
 }
 body.popover .tray-popover {
   width: 100%;
   height: 100%;
-  border-radius: 14px;
-  background: var(--bg-elev);
+  border-radius: 12px;
+  background: var(--bg-panel);
   border: 1px solid var(--border-1);
-  box-shadow: var(--shadow-pop);
+  box-shadow: none;
   overflow: hidden;
 }
 
@@ -63,10 +62,10 @@ body.preview .tray-scene {
 /* 预览态卡片：固定宽度，落在桌面场景的状态栏下方（定位由 JS 设 top/right）。 */
 body.preview .tray-popover {
   width: 360px;
-  border-radius: 14px;
-  background: var(--bg-elev);
+  border-radius: 12px;
+  background: var(--bg-panel);
   border: 1px solid var(--border-1);
-  box-shadow: var(--shadow-pop);
+  box-shadow: 0 10px 26px rgba(20,22,28,0.12);
 }
 /* 预览态卡片高度自适应内容：列表区限高，避免无限长。
    popover 态（固定窗口高度）则交给 flex:1 撑满，footer 始终贴底，不露卡片底色。 */
