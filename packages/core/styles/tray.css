@@ -71,15 +71,15 @@ body.preview .tray-popover {
    popover 态（固定窗口高度）则交给 flex:1 撑满，footer 始终贴底，不露卡片底色。 */
 body.preview .tray-listbox { max-height: 360px; }
 
-/* 自定义滚动条 —— 与主应用一致 */
-.tray-scroll { overflow-y: auto; scrollbar-width: thin; scrollbar-color: #33363d transparent; }
+/* 自定义滚动条 —— 与主应用一致(暖色调) */
+.tray-scroll { overflow-y: auto; scrollbar-width: thin; scrollbar-color: #4a4a46 transparent; }
 .tray-scroll::-webkit-scrollbar { width: 7px; }
 .tray-scroll::-webkit-scrollbar-thumb {
-  background: #2c2f36; border-radius: 99px;
+  background: #45453f; border-radius: 99px;
   border: 2px solid transparent; background-clip: content-box;
 }
-[data-theme="light"] .tray-scroll { scrollbar-color: #c8ccd2 transparent; }
-[data-theme="light"] .tray-scroll::-webkit-scrollbar-thumb { background: #c8ccd2; }
+[data-theme="light"] .tray-scroll { scrollbar-color: #d3cebf transparent; }
+[data-theme="light"] .tray-scroll::-webkit-scrollbar-thumb { background: #d3cebf; }
 
 button { font-family: inherit; }
 input { font-family: inherit; }

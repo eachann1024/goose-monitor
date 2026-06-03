@@ -465,7 +465,7 @@ class TrayApp {
     const trayIcon = h("span", {
       style: {
         display: "grid", placeItems: "center", width: "22px", height: "20px", borderRadius: "5px",
-        background: light ? "rgba(91,124,250,0.16)" : "rgba(91,124,250,0.28)",
+        background: light ? "rgba(217,119,87,0.14)" : "rgba(224,135,95,0.24)",
         boxShadow: "inset 0 0 0 1px var(--accent)",
       },
       children: [this.brandTile(15, 4)],

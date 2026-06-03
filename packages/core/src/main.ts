@@ -475,7 +475,8 @@ class ProcKillApp {
     const s = this.s;
 
     const brand = appIcon({ id: "__brand", name: "鹅的监控", monogram: "鹅", color: "#F5B544", procs: 1, cpu: 0, mem: 0, pid: 0, path: "", helpers: [], iconUrl: BRAND_ICON_URL } as AppRow, 18, 5);
-    this.titleText = h("span", { className: "t-row", style: { fontWeight: "650", color: "var(--fg-1)" }, text: "鹅的监控" });
+    // 视图标题用衬线显示体(Newsreader + Noto Serif SC),复刻 goose-run 暖极简标题
+    this.titleText = h("span", { style: { font: "600 16px/22px var(--font-serif)", color: "var(--fg-1)", whiteSpace: "nowrap" }, text: "鹅的监控" });
     this.countBadge = h("span", {
       style: {
         font: "var(--t-mono-sm)", color: "var(--fg-3)",
@@ -1131,7 +1132,7 @@ class ProcKillApp {
     const scrim = h("div", {
       className: "scrim",
       style: {
-        position: "absolute", inset: "0", background: "rgba(8,9,12,0.55)",
+        position: "absolute", inset: "0", background: "rgba(20,15,10,0.52)",
         backdropFilter: "blur(3px)", display: "grid", placeItems: "center", zIndex: "50",
       },
       on: { click: () => { s.dialogApp = null; this.update(); } },
