@@ -25,7 +25,9 @@ import BRAND_ICON_URL from "../assets/app-icon.png";
 const TRAY_W = 360;
 const REFRESH_MS = 2000;
 
-type View = "default" | "settings";
+type View = "default" | "settings" | "timer";
+type TimerTab = "countdown" | "schedule";
+type TimerMode = "set" | "running" | "paused" | "due" | "done";
 
 // 自动清理「空闲超过」可选时长（分钟）与「CPU 阈值」可选上限（%）。
 const IDLE_MIN_OPTIONS = [10, 30, 60, 120];
@@ -45,6 +47,21 @@ interface TrayState {
   cpuMax: number;                 // 且 CPU < N%
   confirmKill: boolean;           // 结束前二次确认
   autostart: boolean;             // 开机自启
+  timerTab: TimerTab;             // 定时退出：倒计时 / 计划
+  timerMode: TimerMode;
+  timerMinutes: number;
+  timerTotalSec: number;
+  timerRemainSec: number;
+  timerTargetIds: string[];
+  scheduleRules: ScheduleRule[];
+}
+
+interface ScheduleRule {
+  id: string;
+  time: string;
+  repeat: "daily" | "workday";
+  appIds: string[];
+  on: boolean;
 }
 
 // 一行的复用引用（增量 diff 用）
@@ -62,6 +79,9 @@ class TrayApp {
   private root: HTMLElement;
   private s: TrayState;
   private refreshTimer: number | null = null;
+  private countdownTimer: number | null = null;
+  private scheduleTimer: number | null = null;
+  private pendingConfirmCancel: (() => void) | null = null;
   private loadSeq = 0;
   private recentlyKilled = new Map<string, number>();
   private static readonly KILL_MASK_MS = 4000;
@@ -74,6 +94,8 @@ class TrayApp {
   private popover!: HTMLElement;      // popover 卡片本体（两种宿主都用）
   private bodyDefault!: HTMLElement;  // 默认弹层内容容器
   private bodySettings!: HTMLElement; // 偏好设置内容容器
+  private bodyTimer!: HTMLElement;    // 定时退出内容容器
+  private confirmLayer!: HTMLElement; // 自定义确认卡片层
   // 默认弹层内的引用
   private killBtn!: HTMLElement; private killBtnCount!: HTMLElement;
   private searchInput!: HTMLInputElement;
@@ -109,6 +131,13 @@ class TrayApp {
       cpuMax: this.readNumPref("pk_tray_cpumax", 1, CPU_MAX_OPTIONS),
       confirmKill: this.bridge.getPref("pk_tray_confirm") !== "0", // 默认开
       autostart: this.bridge.getPref("pk_tray_autostart") === "1",
+      timerTab: (this.bridge.getPref("pk_tray_timer_tab") === "schedule" ? "schedule" : "countdown"),
+      timerMode: "set",
+      timerMinutes: this.readNumPref("pk_tray_timer_minutes", 45, [15, 30, 45, 60, 90, 120]),
+      timerTotalSec: 45 * 60,
+      timerRemainSec: 45 * 60,
+      timerTargetIds: [],
+      scheduleRules: this.readScheduleRules(),
     };
     this.applyTheme();
   }
@@ -118,6 +147,25 @@ class TrayApp {
     const raw = this.bridge.getPref(key);
     const n = raw == null ? NaN : Number(raw);
     return allowed.includes(n) ? n : def;
+  }
+
+  private readScheduleRules(): ScheduleRule[] {
+    const fallback: ScheduleRule[] = [
+      { id: "lunch", time: "12:30", repeat: "workday", appIds: [], on: false },
+      { id: "eod", time: "18:45", repeat: "daily", appIds: [], on: false },
+    ];
+    const raw = this.bridge.getPref("pk_tray_timer_rules");
+    if (!raw) return fallback;
+    try {
+      const parsed = JSON.parse(raw) as ScheduleRule[];
+      return Array.isArray(parsed) && parsed.length ? parsed : fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  private saveScheduleRules(): void {
+    this.bridge.setPref("pk_tray_timer_rules", JSON.stringify(this.s.scheduleRules));
   }
 
   private resolveTheme(): "dark" | "light" {
@@ -274,13 +322,64 @@ class TrayApp {
   private async killSelected(): Promise<void> {
     const targets = this.s.list.filter((a) => this.s.selected.has(a.id));
     if (!targets.length) return;
-    if (this.s.confirmKill && !this.previewScene) {
-      const ok = window.confirm(
-        `结束所选 ${targets.length} 个应用？\n这将强制结束它们及合并的子进程，未保存的内容可能会丢失。`,
-      );
+    if (this.s.confirmKill) {
+      const ok = await this.confirmKillTargets(targets, "结束所选应用");
       if (!ok) return;
     }
     await this.doKill(targets);
+  }
+
+  private async confirmKillTargets(targets: AppRow[], title: string): Promise<boolean> {
+    if (!targets.length) return false;
+    const names = targets.map((a) => a.name).slice(0, 3).join("、") + (targets.length > 3 ? ` 等 ${targets.length} 个` : "");
+    return new Promise((resolve) => {
+      let dontRemind = false;
+      const close = (ok: boolean) => {
+        if (ok && dontRemind) this.setPref("confirmKill", false, "pk_tray_confirm", "0");
+        this.pendingConfirmCancel = null;
+        this.hideConfirmLayer();
+        resolve(ok);
+      };
+      this.pendingConfirmCancel = () => close(false);
+      const checkBox = h("span", { style: { width: "16px", height: "16px", borderRadius: "5px", border: "1.5px solid var(--border-strong)", display: "grid", placeItems: "center", flex: "none" } });
+      const toggle = () => {
+        dontRemind = !dontRemind;
+        checkBox.style.background = dontRemind ? "var(--accent)" : "transparent";
+        checkBox.style.borderColor = dontRemind ? "var(--accent)" : "var(--border-strong)";
+        checkBox.replaceChildren(...(dontRemind ? [icon("check", 11, { color: "var(--fg-on-accent)" } as any)] : []));
+      };
+      const card = h("div", {
+        style: { width: "300px", borderRadius: "14px", background: "var(--bg-elev)", border: "1px solid var(--border-2)", boxShadow: "var(--shadow-pop)", padding: "18px", color: "var(--fg-1)" },
+        children: [
+          h("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: [
+            h("span", { style: { width: "34px", height: "34px", borderRadius: "10px", display: "grid", placeItems: "center", background: "var(--danger-bg)", color: "var(--danger-fg)" }, children: [icon("power", 18)] }),
+            h("div", { children: [
+              h("div", { style: { font: "var(--t-lg)", fontWeight: "700", color: "var(--fg-1)" }, text: title }),
+              h("div", { style: { font: "var(--t-xs)", color: "var(--fg-3)", marginTop: "2px" }, text: `${targets.length} 个应用 · Enter 确认` }),
+            ] }),
+          ] }),
+          h("p", { style: { margin: "14px 0 0", font: "var(--t-sm)", color: "var(--fg-2)" }, text: `将强制结束 ${names} 及其合并的子进程，未保存内容可能会丢失。` }),
+          h("button", { style: { marginTop: "14px", width: "100%", display: "flex", alignItems: "center", gap: "8px", padding: "0", border: "none", background: "transparent", color: "var(--fg-2)", cursor: "pointer", font: "var(--t-sm)", textAlign: "left" }, on: { click: toggle }, children: [checkBox, document.createTextNode("以后不再提醒")] }),
+          h("div", { style: { display: "flex", gap: "10px", marginTop: "18px" }, children: [
+            h("button", { style: { flex: "1", height: "36px", borderRadius: "10px", border: "1px solid var(--border-2)", background: "var(--bg-panel)", color: "var(--fg-1)", cursor: "pointer", font: "var(--t-base)", fontWeight: "600" }, on: { click: () => close(false) }, text: "取消" }),
+            h("button", { style: { flex: "1", height: "36px", borderRadius: "10px", border: "none", background: "var(--danger)", color: "var(--fg-on-accent)", cursor: "pointer", font: "var(--t-base)", fontWeight: "700" }, on: { click: () => close(true) }, text: "结束" }),
+          ] }),
+        ],
+      });
+      this.confirmLayer.style.display = "grid";
+      this.confirmLayer.replaceChildren(card);
+    });
+  }
+
+  private hideConfirmLayer(): void {
+    this.confirmLayer.replaceChildren();
+    this.confirmLayer.style.display = "none";
+  }
+
+  private cancelConfirm(): void {
+    const cancel = this.pendingConfirmCancel;
+    if (cancel) cancel();
+    else this.hideConfirmLayer();
   }
 
   private async doKill(targets: AppRow[]): Promise<void> {
@@ -315,6 +414,7 @@ class TrayApp {
     this.installKeys();
     this.renderView();
     this.load(true);
+    this.armScheduleTimers();
     (window as any).__prockillTray = this;
   }
 
@@ -327,12 +427,25 @@ class TrayApp {
 
     this.bodyDefault = this.buildDefaultBody();
     this.bodySettings = this.buildSettingsBody();
+    this.bodyTimer = this.buildTimerBody();
     this.popover.appendChild(this.bodyDefault);
     this.popover.appendChild(this.bodySettings);
+    this.popover.appendChild(this.bodyTimer);
 
     // 浮层（EditPill 下拉等）—— 绝对定位在 popover 内，默认空。
     this.menuLayer = h("div");
     this.popover.appendChild(this.menuLayer);
+
+    this.confirmLayer = h("div", {
+      style: {
+        position: "absolute", inset: "0", zIndex: "70", display: "none", placeItems: "center",
+        background: "rgba(8,9,12,0.48)", backdropFilter: "blur(3px)", pointerEvents: "auto",
+      },
+    });
+    this.confirmLayer.addEventListener("click", (e) => {
+      if (e.target === this.confirmLayer) this.cancelConfirm();
+    });
+    this.popover.appendChild(this.confirmLayer);
 
     if (this.previewScene) {
       this.scene = this.buildScene(this.popover);
@@ -390,7 +503,7 @@ class TrayApp {
     });
 
     // popover 在场景中定位到右上
-    Object.assign(popover.style, { position: "absolute", top: "36px", right: "20px", width: TRAY_W + "px" } as Partial<CSSStyleDeclaration>);
+    Object.assign(popover.style, { position: "absolute", top: "36px", right: "12px", width: "326px" } as Partial<CSSStyleDeclaration>);
 
     return h("div", {
       className: "tray-scene",
@@ -430,6 +543,17 @@ class TrayApp {
       children: [icon("power", 16), document.createTextNode("结束所选"), this.killBtnCount],
     });
 
+    const timerBtn = h("button", {
+      attrs: { title: "定时退出" },
+      style: {
+        width: "100%", height: "40px", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+        borderRadius: "10px", border: "1px solid var(--border-2)", background: "var(--bg-elev)", color: "var(--fg-1)",
+        cursor: "pointer", font: "var(--t-base)", fontWeight: "700", marginTop: "8px",
+      },
+      on: { click: () => this.openTimer("countdown") },
+      children: [icon("clock", 16, { color: "var(--accent)" } as any), document.createTextNode("定时退出")],
+    });
+
     this.searchInput = h("input", {
       attrs: { placeholder: "搜索应用…" },
       style: {
@@ -450,7 +574,7 @@ class TrayApp {
       ],
     });
 
-    body.appendChild(h("div", { style: { padding: "12px 12px 6px" }, children: [this.killBtn, searchBar] }));
+    body.appendChild(h("div", { style: { padding: "12px 12px 6px" }, children: [this.killBtn, timerBtn, searchBar] }));
 
     // —— 列表区 ——
     this.listBox = h("div", {
@@ -501,7 +625,7 @@ class TrayApp {
 
   // ---------- 偏好设置 ----------
   private buildSettingsBody(): HTMLElement {
-    const body = h("div", { style: { flex: "1", display: "none", flexDirection: "column", minHeight: "0" } });
+    const body = h("div", { style: { flex: "1", display: "none", flexDirection: "column", minHeight: "0", background: "var(--bg-panel)" } });
 
     // header
     const back = h("button", {
@@ -511,7 +635,7 @@ class TrayApp {
       children: [icon("arrow-left", 17)],
     });
     body.appendChild(h("div", {
-      style: { height: "46px", flex: "none", display: "flex", alignItems: "center", gap: "8px", padding: "0 8px", borderBottom: "1px solid var(--border-1)" },
+      style: { height: "46px", flex: "none", display: "flex", alignItems: "center", gap: "8px", padding: "0 8px", borderBottom: "1px solid var(--border-1)", background: "var(--bg-panel)" },
       children: [
         back,
         h("span", { style: { font: "var(--t-lg)", fontWeight: "700", color: "var(--fg-1)" }, text: "偏好设置" }),
@@ -548,11 +672,11 @@ class TrayApp {
       } }))),
     );
 
-    body.appendChild(h("div", { style: { padding: "6px 0 2px" }, children: [
+    body.appendChild(h("div", { style: { padding: "4px 0 2px" }, children: [
       h("div", { className: "t-label", style: { padding: "10px 14px 4px" }, text: "自动清理" }),
       this.setRow("zap", "var(--warn)", "空闲应用自动结束", "满足下列条件的应用自动 Quit", cleanSwitch),
       // 可定义条件（缩进 53px 与父行图标对齐）
-      h("div", { style: { display: "flex", flexDirection: "column", gap: "8px", padding: "0 12px 14px 53px" }, children: [
+      h("div", { style: { display: "flex", flexDirection: "column", gap: "8px", padding: "0 12px 12px 53px" }, children: [
         h("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: [
           h("span", { className: "t-xs", style: { color: "var(--fg-3)", width: "58px", flex: "none" }, text: "空闲超过" }),
           idlePill,
@@ -563,7 +687,7 @@ class TrayApp {
         ] }),
       ] }),
 
-      h("div", { style: { height: "1px", background: "var(--border-1)", margin: "2px 12px 6px" } }),
+      h("div", { style: { height: "1px", background: "var(--border-1)", margin: "0 12px 6px" } }),
 
       this.setRow("check", null, "结束前二次确认", "批量结束时弹出确认（含「不再提醒」）", confirmSwitch),
       this.setRow("moon-star", null, "开机时随系统启动", "", autostartSwitch),
@@ -572,23 +696,15 @@ class TrayApp {
     // 弹性占位：把 footer 顶到卡片底部
     body.appendChild(h("div", { style: { flex: "1", minHeight: "0" } }));
 
-    // footer：完成 ⏎
-    const doneKbd = h("span", {
-      style: {
-        display: "inline-flex", alignItems: "center", justifyContent: "center", minWidth: "18px",
-        height: "18px", padding: "0 5px", borderRadius: "5px", background: "rgba(255,255,255,0.22)",
-        font: "var(--t-mono-sm)", color: "#fff",
-      },
-      text: "⏎",
-    });
+    // footer：完成
     body.appendChild(h("footer", {
       style: { marginTop: "auto", height: "48px", flex: "none", display: "flex", alignItems: "center", padding: "0 12px", borderTop: "1px solid var(--border-1)", background: "var(--bg-sidebar)" },
       children: [
         h("span", { className: "t-xs", style: { color: "var(--fg-3)" }, text: "更改即时生效" }),
         h("button", {
-          style: { marginLeft: "auto", height: "32px", padding: "0 12px 0 16px", borderRadius: "9px", border: "none", cursor: "pointer", background: "var(--accent)", color: "var(--fg-on-accent)", font: "var(--t-base)", fontWeight: "700", display: "inline-flex", alignItems: "center", gap: "8px" },
+          style: { marginLeft: "auto", height: "32px", padding: "0 18px", borderRadius: "9px", border: "none", cursor: "pointer", background: "var(--accent)", color: "var(--fg-on-accent)", font: "var(--t-base)", fontWeight: "700", display: "inline-flex", alignItems: "center", gap: "8px" },
           on: { click: () => this.closeSettings() },
-          children: [document.createTextNode("完成 "), doneKbd],
+          text: "完成",
         }),
       ],
     }));
@@ -656,9 +772,288 @@ class TrayApp {
     this.renderView();
   }
 
+  private openTimer(tab: TimerTab = this.s.timerTab): void {
+    this.s.view = "timer";
+    this.s.timerTab = tab;
+    this.bridge.setPref("pk_tray_timer_tab", tab);
+    this.closeMenu();
+    this.renderView();
+    this.renderTimerBody();
+  }
+
+  private closeTimer(): void {
+    this.s.view = "default";
+    this.closeMenu();
+    this.renderView();
+  }
+
+  private selectedTargets(): AppRow[] {
+    return this.s.list.filter((a) => this.s.selected.has(a.id));
+  }
+
+  private targetsByIds(ids: string[]): AppRow[] {
+    return this.s.list.filter((a) => ids.includes(a.id));
+  }
+
+  private appChip(app: AppRow): HTMLElement {
+    return h("span", {
+      style: { height: "28px", display: "inline-flex", alignItems: "center", gap: "7px", padding: "0 9px 0 4px", borderRadius: "999px", background: "var(--bg-elev)", border: "1px solid var(--border-1)", color: "var(--fg-2)", font: "var(--t-xs)", whiteSpace: "nowrap" },
+      children: [appIcon(app, 20, 6), document.createTextNode(app.name.replace("Google ", ""))],
+    });
+  }
+
+  private buildTimerBody(): HTMLElement {
+    const body = h("div", { style: { flex: "1", display: "none", flexDirection: "column", minHeight: "0", background: "var(--bg-panel)" } });
+    return body;
+  }
+
+  private renderTimerBody(): void {
+    if (!this.bodyTimer) return;
+    const tab = this.s.timerTab;
+    const back = h("button", {
+      attrs: { title: "返回　Esc" },
+      style: { width: "30px", height: "30px", display: "grid", placeItems: "center", borderRadius: "8px", border: "none", background: "transparent", color: "var(--fg-2)", cursor: "pointer" },
+      on: { click: () => this.closeTimer() },
+      children: [icon("arrow-left", 17)],
+    });
+    const seg = h("div", { style: { display: "flex", gap: "3px", padding: "3px", borderRadius: "11px", background: "var(--bg-input)", border: "1px solid var(--border-1)" } });
+    for (const [id, label, iconName] of [["countdown", "倒计时", "timer"], ["schedule", "计划", "calendar"]] as const) {
+      const on = tab === id;
+      seg.appendChild(h("button", {
+        style: { flex: "1", height: "34px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "7px", borderRadius: "8px", border: "none", cursor: "pointer", font: "var(--t-base)", fontWeight: "700", background: on ? "var(--bg-row-sel)" : "transparent", color: on ? "var(--accent)" : "var(--fg-2)", boxShadow: on ? "inset 0 0 0 1px var(--accent)" : "none" },
+        on: { click: () => this.openTimer(id) },
+        children: [icon(iconName, 15), document.createTextNode(label)],
+      }));
+    }
+    const header = h("header", { style: { flex: "none", padding: "10px 12px", borderBottom: "1px solid var(--border-1)" }, children: [
+      h("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px" }, children: [
+        back,
+        h("span", { style: { font: "var(--t-title)", color: "var(--fg-1)", whiteSpace: "nowrap" }, text: "定时退出" }),
+        h("span", { style: { marginLeft: "auto", color: "var(--fg-3)", font: "var(--t-xs)", whiteSpace: "nowrap" }, text: tab === "countdown" ? "一次性 · 到点退出" : "按计划 · 自动退出" }),
+      ] }),
+      seg,
+    ] });
+    this.bodyTimer.replaceChildren(header, tab === "countdown" ? this.buildCountdownPane() : this.buildSchedulePane());
+  }
+
+  private buildCountdownPane(): HTMLElement {
+    const targets = this.s.timerMode === "set" ? this.selectedTargets() : this.targetsByIds(this.s.timerTargetIds);
+    const mode = this.s.timerMode;
+    const setMode = mode === "set";
+    const remaining = this.s.timerRemainSec;
+    const mm = Math.floor(remaining / 60);
+    const ss = remaining % 60;
+    const pct = setMode ? this.s.timerMinutes / 120 : Math.max(0, remaining / Math.max(1, this.s.timerTotalSec));
+    const dash = 565 * (1 - Math.min(1, Math.max(0, pct)));
+    const center = setMode ? `${this.s.timerMinutes}` : `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+    const dial = h("div", { style: { position: "relative", width: "218px", height: "218px", margin: "10px auto 0", touchAction: "none", cursor: setMode ? "grab" : "default" } });
+    dial.innerHTML = `<svg viewBox="0 0 220 220" width="218" height="218" style="display:block"><circle cx="110" cy="110" r="90" fill="none" stroke="var(--bg-track)" stroke-width="14"/><circle cx="110" cy="110" r="90" fill="none" stroke="var(--accent)" stroke-width="14" stroke-linecap="round" stroke-dasharray="565" stroke-dashoffset="${dash}" transform="rotate(-90 110 110)"/></svg>`;
+    dial.appendChild(h("div", { style: { position: "absolute", inset: "0", display: "grid", placeItems: "center", pointerEvents: "none", textAlign: "center" }, children: [
+      h("div", { children: [
+        h("div", { style: { font: "600 44px/1 var(--font-mono)", color: "var(--fg-1)", fontVariantNumeric: "tabular-nums" }, text: center }),
+        h("div", { style: { font: "var(--t-sm)", color: "var(--fg-3)", marginTop: "7px" }, text: setMode ? "拖表盘调时长" : (mode === "paused" ? "已暂停" : `剩余 · 共 ${Math.round(this.s.timerTotalSec / 60)} 分`) }),
+      ] }),
+    ] }));
+    if (setMode) {
+      const setFromEvent = (e: PointerEvent) => {
+        const r = dial.getBoundingClientRect();
+        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+        let frac = Math.atan2(e.clientX - cx, -(e.clientY - cy)) / (2 * Math.PI);
+        if (frac < 0) frac += 1;
+        const minutes = Math.max(1, Math.round(frac * 120));
+        this.s.timerMinutes = minutes;
+        this.bridge.setPref("pk_tray_timer_minutes", String(minutes));
+        this.renderTimerBody();
+      };
+      dial.addEventListener("pointerdown", (e) => { dial.setPointerCapture(e.pointerId); setFromEvent(e); });
+      dial.addEventListener("pointermove", (e) => { if ((e.buttons & 1) === 1) setFromEvent(e); });
+    }
+    const pane = h("div", { style: { flex: "1", display: "flex", flexDirection: "column", minHeight: "0", padding: "8px 18px 0", overflow: "hidden" }, children: [dial] });
+    if (setMode) {
+      const presets = h("div", { style: { display: "flex", justifyContent: "center", gap: "8px", marginTop: "14px", flexWrap: "wrap" } });
+      for (const m of [15, 30, 45, 60]) presets.appendChild(h("button", { style: { height: "30px", padding: "0 13px", borderRadius: "999px", border: m === this.s.timerMinutes ? "1px solid var(--accent)" : "1px solid var(--border-2)", background: m === this.s.timerMinutes ? "var(--bg-row-sel)" : "transparent", color: m === this.s.timerMinutes ? "var(--accent)" : "var(--fg-2)", cursor: "pointer", font: "var(--t-sm)", fontWeight: "700" }, on: { click: () => { this.s.timerMinutes = m; this.bridge.setPref("pk_tray_timer_minutes", String(m)); this.renderTimerBody(); } }, text: `${m} 分` }));
+      pane.appendChild(presets);
+      pane.appendChild(h("div", { className: "t-label", style: { marginTop: "18px", marginBottom: "8px" }, text: "到点退出这些应用" }));
+      pane.appendChild(targets.length ? h("div", { style: { display: "flex", flexWrap: "wrap", gap: "8px" }, children: targets.map((a) => this.appChip(a)) }) : h("div", { style: { color: "var(--fg-3)", font: "var(--t-sm)", padding: "8px 0" }, text: "先在列表里勾选要定时退出的应用" }));
+      pane.appendChild(h("div", { style: { flex: "1" } }));
+      pane.appendChild(h("button", { style: { height: "44px", marginBottom: "14px", borderRadius: "12px", border: "none", background: targets.length ? "var(--accent)" : "var(--bg-elev)", color: targets.length ? "var(--fg-on-accent)" : "var(--fg-3)", cursor: targets.length ? "pointer" : "default", font: "var(--t-base)", fontSize: "14px", fontWeight: "800", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "9px" }, on: { click: () => this.startCountdown() }, children: [icon("play", 16), document.createTextNode(targets.length ? `${this.s.timerMinutes} 分钟后退出` : "请选择应用")] }));
+    } else if (mode === "due") {
+      pane.appendChild(h("div", { style: { textAlign: "center", color: "var(--fg-2)", font: "var(--t-sm)", marginTop: "10px" }, text: `时间到，准备退出 ${targets.length} 个应用` }));
+      pane.appendChild(h("div", { style: { display: "flex", gap: "10px", marginTop: "auto", marginBottom: "16px" }, children: [
+        h("button", { style: { flex: "1", height: "42px", borderRadius: "11px", border: "1px solid var(--border-2)", background: "var(--bg-elev)", color: "var(--fg-1)", cursor: "pointer", font: "var(--t-base)", fontWeight: "700" }, on: { click: () => this.snoozeCountdown() }, text: "顺延 10 分" }),
+        h("button", { style: { flex: "1", height: "42px", borderRadius: "11px", border: "none", background: "var(--danger)", color: "var(--fg-on-accent)", cursor: "pointer", font: "var(--t-base)", fontWeight: "800" }, on: { click: () => void this.finishCountdownKill() }, text: "立即退出" }),
+      ] }));
+    } else {
+      pane.appendChild(h("div", { style: { display: "flex", flexWrap: "wrap", gap: "8px", justifyContent: "center", marginTop: "14px" }, children: targets.map((a) => this.appChip(a)) }));
+      pane.appendChild(h("div", { style: { flex: "1" } }));
+      pane.appendChild(h("footer", { style: { display: "flex", justifyContent: "center", gap: "22px", paddingBottom: "16px" }, children: [
+        this.roundAction("plus", "+10 分", () => { this.s.timerRemainSec += 600; this.s.timerTotalSec += 600; this.renderTimerBody(); }),
+        this.roundAction(mode === "running" ? "pause" : "play", mode === "running" ? "暂停" : "继续", () => { this.s.timerMode = mode === "running" ? "paused" : "running"; this.ensureCountdownTick(); this.renderTimerBody(); }),
+        this.roundAction("x", "取消", () => this.cancelCountdown(), true),
+      ] }));
+    }
+    return pane;
+  }
+
+  private roundAction(iconName: string, label: string, fn: () => void, danger = false): HTMLElement {
+    return h("button", { style: { display: "inline-flex", flexDirection: "column", alignItems: "center", gap: "6px", border: "none", background: "transparent", color: danger ? "var(--danger-fg)" : "var(--fg-2)", cursor: "pointer", font: "var(--t-xs)" }, on: { click: fn }, children: [
+      h("span", { style: { width: "48px", height: "48px", display: "grid", placeItems: "center", borderRadius: "999px", background: danger ? "var(--danger-bg)" : "var(--bg-elev)", border: `1px solid ${danger ? "var(--danger)" : "var(--border-2)"}` }, children: [icon(iconName, 19)] }),
+      document.createTextNode(label),
+    ] });
+  }
+
+  private buildSchedulePane(): HTMLElement {
+    const active = this.s.scheduleRules.filter((r) => r.on).length;
+    const pane = h("div", { style: { flex: "1", display: "flex", flexDirection: "column", minHeight: "0", overflow: "hidden" } });
+    pane.appendChild(h("div", { style: { padding: "12px 14px", borderBottom: "1px solid var(--border-1)" }, children: [
+      h("div", { className: "t-label", text: `今天 · ${active} 条生效` }),
+      this.timeline(),
+    ] }));
+    const list = h("div", { className: "tray-scroll", style: { flex: "1", minHeight: "0", overflowY: "auto", padding: "12px 14px", display: "flex", flexDirection: "column", gap: "9px" } });
+    for (const rule of this.s.scheduleRules) list.appendChild(this.ruleCard(rule));
+    list.appendChild(h("button", { style: { height: "40px", borderRadius: "11px", border: "1.5px dashed var(--border-strong)", background: "transparent", color: "var(--fg-2)", cursor: "pointer", font: "var(--t-base)", fontWeight: "700", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "8px" }, on: { click: () => this.addScheduleRule() }, children: [icon("plus", 15, { color: "var(--accent)" } as any), document.createTextNode("新建定时")] }));
+    pane.appendChild(list);
+    return pane;
+  }
+
+  private timeline(): HTMLElement {
+    const wrap = h("div", { style: { position: "relative", height: "88px", marginTop: "6px" } });
+    wrap.appendChild(h("div", { style: { position: "absolute", left: "0", right: "0", top: "54px", height: "10px", borderRadius: "999px", background: "var(--bg-track)", overflow: "hidden" } }));
+    for (const hour of [0, 6, 12, 18, 24]) {
+      wrap.appendChild(h("span", { style: { position: "absolute", left: `${Math.min(99.5, (hour / 24) * 100)}%`, top: "70px", transform: hour === 0 ? "none" : hour === 24 ? "translateX(-100%)" : "translateX(-50%)", color: "var(--fg-3)", font: "var(--t-xs)", fontVariantNumeric: "tabular-nums" }, text: `${String(hour).padStart(2, "0")}:00` }));
+    }
+    for (const rule of this.s.scheduleRules) {
+      const [hh, mm] = rule.time.split(":").map(Number);
+      const left = ((hh + mm / 60) / 24) * 100;
+      wrap.appendChild(h("div", { style: { position: "absolute", left: `${left}%`, top: "2px", transform: "translateX(-50%)", display: "flex", flexDirection: "column", alignItems: "center", opacity: rule.on ? "1" : "0.38" }, children: [
+        h("span", { style: { width: "22px", height: "22px", borderRadius: "7px", display: "grid", placeItems: "center", background: "var(--bg-elev)", border: "1px solid var(--border-2)", color: rule.on ? "var(--accent)" : "var(--fg-3)" }, children: [icon("clock", 13)] }),
+        h("span", { style: { marginTop: "4px", color: "var(--fg-2)", font: "var(--t-mono-sm)", fontWeight: "700" }, text: rule.time }),
+        h("span", { style: { marginTop: "3px", width: "2px", height: "14px", borderRadius: "2px", background: rule.on ? "var(--accent)" : "var(--border-strong)" } }),
+      ] }));
+    }
+    return wrap;
+  }
+
+  private ruleCard(rule: ScheduleRule): HTMLElement {
+    const targets = this.ruleTargets(rule);
+    return h("div", { style: { display: "flex", alignItems: "center", gap: "12px", padding: "11px 12px", borderRadius: "13px", background: "var(--bg-elev)", border: "1px solid var(--border-1)", opacity: rule.on ? "1" : "0.62" }, children: [
+      h("div", { style: { minWidth: "48px", textAlign: "center", color: "var(--fg-1)", font: "600 18px/1 var(--font-mono)", fontVariantNumeric: "tabular-nums" }, text: rule.time }),
+      h("div", { style: { width: "1px", alignSelf: "stretch", background: "var(--border-1)" } }),
+      h("div", { style: { flex: "1", minWidth: "0" }, children: [
+        h("div", { style: { display: "inline-flex", alignItems: "center", gap: "5px", color: "var(--fg-3)", font: "var(--t-xs)", marginBottom: "6px" }, children: [icon(rule.repeat === "workday" ? "briefcase" : "repeat", 12), document.createTextNode(rule.repeat === "workday" ? "每个工作日" : "每天")] }),
+        h("div", { style: { color: "var(--fg-2)", font: "var(--t-sm)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }, text: targets.map((a) => a.name.replace("Google ", "")).join("、") || "当前所选应用" }),
+      ] }),
+      this.switch(rule.on, (on) => {
+        if (on && !rule.appIds.length) {
+          const targets = this.selectedTargets();
+          if (!targets.length) { this.toast("先勾选应用再启用计划"); this.renderTimerBody(); return; }
+          rule.appIds = targets.map((a) => a.id);
+        }
+        rule.on = on;
+        this.saveScheduleRules();
+        this.armScheduleTimers();
+        this.renderTimerBody();
+      }),
+    ] });
+  }
+
+  private ruleTargets(rule: ScheduleRule): AppRow[] {
+    return this.targetsByIds(rule.appIds);
+  }
+
+  private addScheduleRule(): void {
+    const targets = this.selectedTargets();
+    if (!targets.length) { this.toast("先勾选要定时退出的应用"); return; }
+    const now = new Date();
+    now.setMinutes(now.getMinutes() + 30);
+    const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    this.s.scheduleRules.push({ id: `rule-${Date.now()}`, time, repeat: "daily", appIds: targets.map((a) => a.id), on: true });
+    this.saveScheduleRules();
+    this.armScheduleTimers();
+    this.renderTimerBody();
+  }
+
+  private startCountdown(): void {
+    const targets = this.selectedTargets();
+    if (!targets.length) { this.toast("先勾选要定时退出的应用"); return; }
+    const seconds = this.s.timerMinutes * 60;
+    this.s.timerTargetIds = targets.map((a) => a.id);
+    this.s.timerTotalSec = seconds;
+    this.s.timerRemainSec = seconds;
+    this.s.timerMode = "running";
+    this.ensureCountdownTick();
+    this.renderTimerBody();
+  }
+
+  private ensureCountdownTick(): void {
+    if (this.countdownTimer != null) window.clearInterval(this.countdownTimer);
+    if (this.s.timerMode !== "running") return;
+    this.countdownTimer = window.setInterval(() => {
+      if (this.s.timerMode !== "running") return;
+      this.s.timerRemainSec = Math.max(0, this.s.timerRemainSec - 1);
+      if (this.s.timerRemainSec <= 0) {
+        if (this.countdownTimer != null) window.clearInterval(this.countdownTimer);
+        this.countdownTimer = null;
+        this.s.timerMode = "due";
+        void this.finishCountdownKill();
+      }
+      this.renderTimerBody();
+    }, 1000);
+  }
+
+  private snoozeCountdown(): void {
+    this.s.timerTotalSec = 600;
+    this.s.timerRemainSec = 600;
+    this.s.timerMode = "running";
+    this.ensureCountdownTick();
+    this.renderTimerBody();
+  }
+
+  private cancelCountdown(): void {
+    if (this.countdownTimer != null) window.clearInterval(this.countdownTimer);
+    this.countdownTimer = null;
+    this.s.timerMode = "set";
+    this.s.timerTargetIds = [];
+    this.s.timerRemainSec = this.s.timerMinutes * 60;
+    this.s.timerTotalSec = this.s.timerRemainSec;
+    this.renderTimerBody();
+  }
+
+  private async finishCountdownKill(): Promise<void> {
+    const targets = this.targetsByIds(this.s.timerTargetIds);
+    if (!targets.length) { this.toast("没有可退出的目标应用"); this.cancelCountdown(); return; }
+    if (this.s.confirmKill) {
+      const ok = await this.confirmKillTargets(targets, "定时退出应用");
+      if (!ok) return;
+    }
+    await this.doKill(targets);
+    this.s.timerMode = "done";
+    this.renderTimerBody();
+  }
+
+  private armScheduleTimers(): void {
+    if (this.scheduleTimer != null) window.clearTimeout(this.scheduleTimer);
+    const now = new Date();
+    let next: { rule: ScheduleRule; at: Date } | null = null;
+    for (const rule of this.s.scheduleRules.filter((r) => r.on && r.appIds.length)) {
+      const [hh, mm] = rule.time.split(":").map(Number);
+      const at = new Date(now);
+      at.setHours(hh, mm, 0, 0);
+      if (at <= now) at.setDate(at.getDate() + 1);
+      if (!next || at < next.at) next = { rule, at };
+    }
+    if (!next) return;
+    const delay = Math.max(1000, Math.min(24 * 60 * 60 * 1000, next.at.getTime() - now.getTime()));
+    this.scheduleTimer = window.setTimeout(async () => {
+      const targets = this.ruleTargets(next!.rule);
+      if (targets.length && (!this.s.confirmKill || await this.confirmKillTargets(targets, "计划退出应用"))) await this.doKill(targets);
+      this.armScheduleTimers();
+    }, delay);
+  }
+
   // 开关
   private switch(on: boolean, onToggle: (on: boolean) => void): HTMLElement {
-    const knob = h("span", { style: { width: "16px", height: "16px", borderRadius: "999px", background: "#fff", boxShadow: "0 1px 2px rgba(0,0,0,0.3)" } });
+    const knob = h("span", { style: { width: "16px", height: "16px", borderRadius: "999px", background: "var(--fg-on-accent)", boxShadow: "0 1px 2px rgba(0,0,0,0.3)" } });
     const sw = h("span", {
       attrs: { role: "switch" },
       style: {
@@ -697,9 +1092,12 @@ class TrayApp {
   // ============================================================
   private renderView(): void {
     const settings = this.s.view === "settings";
-    this.bodyDefault.style.display = settings ? "none" : "flex";
+    const timer = this.s.view === "timer";
+    this.bodyDefault.style.display = settings || timer ? "none" : "flex";
     this.bodySettings.style.display = settings ? "flex" : "none";
-    const target = settings ? this.bodySettings : this.bodyDefault;
+    this.bodyTimer.style.display = timer ? "flex" : "none";
+    if (timer) this.renderTimerBody();
+    const target = settings ? this.bodySettings : timer ? this.bodyTimer : this.bodyDefault;
     target.classList.remove("tray-fade"); void target.offsetWidth; target.classList.add("tray-fade");
   }
 
@@ -708,7 +1106,7 @@ class TrayApp {
     const has = n > 0;
     Object.assign(this.killBtn.style, {
       background: has ? "var(--danger)" : "var(--bg-elev)",
-      color: has ? "#fff" : "var(--fg-3)",
+      color: has ? "var(--fg-on-accent)" : "var(--fg-3)",
       boxShadow: has ? "0 1px 0 rgba(0,0,0,0.15), inset 0 1px 0 rgba(255,255,255,0.18)" : "none",
       cursor: has ? "pointer" : "default",
     } as Partial<CSSStyleDeclaration>);
@@ -786,7 +1184,7 @@ class TrayApp {
       border: checked ? "1px solid var(--accent)" : "1.5px solid var(--border-strong)",
     } as Partial<CSSStyleDeclaration>);
     ref.check.replaceChildren();
-    if (checked) ref.check.appendChild(icon("check", 12, { color: "#fff" } as any));
+    if (checked) ref.check.appendChild(icon("check", 12, { color: "var(--fg-on-accent)" } as any));
 
     // 图标
     const iconSig = `${a.id}|${a.iconUrl || ""}|${a.color}|${a.monogram}`;
@@ -812,6 +1210,16 @@ class TrayApp {
     window.addEventListener("keydown", (e) => {
       const mod = e.metaKey || e.ctrlKey;
 
+      if (this.confirmLayer.firstChild) {
+        if (e.key === "Escape") { e.preventDefault(); this.cancelConfirm(); return; }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const buttons = Array.from(this.confirmLayer.querySelectorAll("button"));
+          (buttons[buttons.length - 1] as HTMLButtonElement | undefined)?.click();
+          return;
+        }
+      }
+
       // ⌘, 偏好设置（任意视图可切换）
       if (mod && e.key === ",") {
         e.preventDefault();
@@ -824,11 +1232,20 @@ class TrayApp {
         return;
       }
 
+      if (this.s.view === "timer") {
+        if (e.key === "Escape") { e.preventDefault(); this.closeTimer(); }
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          e.preventDefault();
+          this.openTimer(this.s.timerTab === "countdown" ? "schedule" : "countdown");
+        }
+        return;
+      }
+
       // 浮层菜单打开时，Esc 关闭它
       if (e.key === "Escape" && this.menuLayer.firstChild) { e.preventDefault(); this.closeMenu(); return; }
 
       // ⌘F 搜索
-      if (mod && e.key.toLowerCase() === "f") {
+      if ((mod && e.key.toLowerCase() === "f") || (!mod && e.key === "/")) {
         e.preventDefault();
         this.searchInput.focus();
         return;
@@ -844,10 +1261,10 @@ class TrayApp {
       // 在搜索框打字时，只处理导航/勾选/取消，其余交给输入框
       const inSearch = document.activeElement === this.searchInput;
 
-      if (e.key === "ArrowDown") {
+      if (e.key === "ArrowDown" || (!inSearch && e.key.toLowerCase() === "j")) {
         e.preventDefault();
         this.moveCursor(1);
-      } else if (e.key === "ArrowUp") {
+      } else if (e.key === "ArrowUp" || (!inSearch && e.key.toLowerCase() === "k")) {
         e.preventDefault();
         this.moveCursor(-1);
       } else if (e.key === " ") {

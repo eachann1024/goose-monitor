@@ -22,8 +22,8 @@ const SORTS: [SortKey, string][] = [
   ["mem", "内存"], ["cpu", "CPU"], ["procs", "进程数"], ["name", "名称"],
 ];
 
-// 行网格列宽（复刻设计稿 COLS）
-const COLS = "16px 1fr 58px 92px 104px 54px";
+// 行网格列宽（复刻设计稿 v5 compact COLS）
+const COLS = "16px 1fr 52px 96px 110px 56px";
 const REFRESH_MS = 2000;
 
 interface State {
@@ -85,11 +85,10 @@ class ProcKillApp {
   private sortBtnArrow!: SVGElement | HTMLElement;
   private sortBtn!: HTMLElement;
   private sortMenuWrap!: HTMLElement;
-  private sideNavBtns: Record<string, { btn: HTMLElement; icon: HTMLElement; label: HTMLElement }> = {};
+  private categoryBtns: Record<string, { btn: HTMLElement; label: HTMLElement; key: HTMLElement }> = {};
   // 分类快捷键角标：默认隐藏，按住主修饰键（mac=⌘ / win·linux=Ctrl）时整体显示。
   private navKbds: HTMLElement[] = [];
-  private cpuBarFill!: HTMLElement; private cpuBarVal!: HTMLElement;
-  private memBarFill!: HTMLElement; private memBarVal!: HTMLElement;
+  private footerStats!: HTMLElement;
   private searchBar!: HTMLElement;
   private searchInput!: HTMLInputElement;
   private scroll!: HTMLElement;
@@ -395,12 +394,12 @@ class ProcKillApp {
       ) return;
 
       const v = this.visible;
-      if (e.key === "ArrowDown") {
+      if (e.key === "ArrowDown" || e.key.toLowerCase() === "j") {
         e.preventDefault();
         s.sel = Math.min(v.length - 1, s.sel + 1);
         this.pendingScrollToSel = true;
         this.update();
-      } else if (e.key === "ArrowUp") {
+      } else if (e.key === "ArrowUp" || e.key.toLowerCase() === "k") {
         e.preventDefault();
         s.sel = Math.max(0, s.sel - 1);
         this.pendingScrollToSel = true;
@@ -423,8 +422,8 @@ class ProcKillApp {
         e.preventDefault();
         this.load();
       } else if (e.key === "Escape") {
-        if (s.searchOn) {
-          s.searchOn = false; s.query = ""; this.searchInput?.blur();
+        if (s.query || document.activeElement === this.searchInput) {
+          s.query = ""; this.searchInput?.blur();
           this.update();
         }
       }
@@ -460,11 +459,8 @@ class ProcKillApp {
     });
 
     this.win.appendChild(this.buildHeader());
-
-    const body = h("div", { style: { flex: "1", display: "flex", minHeight: "0" } });
-    body.appendChild(this.buildSidebar());
-    body.appendChild(this.buildMain());
-    this.win.appendChild(body);
+    this.win.appendChild(this.buildCategoryTabs());
+    this.win.appendChild(this.buildMain());
 
     this.win.appendChild(this.buildFooter());
 
@@ -478,14 +474,14 @@ class ProcKillApp {
   private buildHeader(): HTMLElement {
     const s = this.s;
 
-    this.titleText = h("span", { className: "t-title" });
+    const brand = appIcon({ id: "__brand", name: "鹅的监控", monogram: "鹅", color: "#F5B544", procs: 1, cpu: 0, mem: 0, pid: 0, path: "", helpers: [], iconUrl: BRAND_ICON_URL } as AppRow, 18, 5);
+    this.titleText = h("span", { className: "t-row", style: { fontWeight: "650", color: "var(--fg-1)" }, text: "鹅的监控" });
     this.countBadge = h("span", {
       style: {
-        font: "var(--t-mono-sm)", color: "var(--fg-3)", padding: "2px 7px",
-        borderRadius: "6px", background: "var(--bg-elev)", border: "1px solid var(--border-1)",
+        font: "var(--t-mono-sm)", color: "var(--fg-3)",
       },
     });
-    const titleWrap = h("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: [this.titleText, this.countBadge] });
+    const titleWrap = h("div", { style: { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" }, children: [brand, this.titleText, this.countBadge] });
 
     // 排序按钮
     this.sortBtnArrow = icon("arrow-down-wide-narrow", 13, { color: "var(--fg-2)" } as any);
@@ -504,6 +500,15 @@ class ProcKillApp {
     this.sortBtn.appendChild(icon("chevron-down", 13, { color: "var(--fg-3)" } as any));
 
     this.sortMenuWrap = h("div", { style: { position: "relative" }, children: [this.sortBtn] });
+
+    const treeBadge = h("span", {
+      style: {
+        display: "inline-flex", alignItems: "center", gap: "5px", height: "26px",
+        padding: "0 9px", borderRadius: "7px", background: "var(--bg-elev)",
+        border: "1px solid var(--border-1)", color: "var(--fg-2)", font: "var(--t-mono-sm)",
+      },
+      children: [icon("git-branch", 12), document.createTextNode("树形")],
+    });
 
     const searchBtn = h("button", {
       attrs: { title: "搜索 ⌘F" },
@@ -540,12 +545,12 @@ class ProcKillApp {
 
     const right = h("div", {
       style: { display: "flex", alignItems: "center", gap: "8px" },
-      children: [this.sortMenuWrap, searchBtn, this.themeBtn, refreshBtn],
+      children: [treeBadge, this.sortMenuWrap, searchBtn, this.themeBtn, refreshBtn],
     });
 
     return h("header", {
       style: {
-        height: "48px", flex: "none", display: "flex", alignItems: "center",
+        height: "42px", flex: "none", display: "flex", alignItems: "center",
         justifyContent: "space-between", padding: "0 12px 0 16px",
         borderBottom: "1px solid var(--border-1)", background: "var(--bg-panel)",
         position: "relative", zIndex: "5",
@@ -598,83 +603,40 @@ class ProcKillApp {
     return menu;
   }
 
-  private buildSidebar(): HTMLElement {
+  private buildCategoryTabs(): HTMLElement {
     const s = this.s;
-    const aside = h("aside", {
+    const tabs = h("div", {
       style: {
-        width: "168px", flex: "none", background: "var(--bg-sidebar)",
-        borderRight: "1px solid var(--border-1)", display: "flex",
-        flexDirection: "column", padding: "8px 8px",
+        height: "34px", flex: "none", display: "flex", alignItems: "center", gap: "4px",
+        padding: "0 12px", borderBottom: "1px solid var(--border-1)",
+        background: "var(--bg-sidebar)", overflow: "hidden",
       },
     });
-    aside.appendChild(h("div", { className: "t-label", style: { padding: "6px 8px 8px" }, text: "分类" }));
-
-    const navWrap = h("div", { style: { display: "flex", flexDirection: "column", gap: "1px" } });
     this.navKbds = [];
-    // mac 角标紧凑（⌘1），win/linux 文字较宽（Ctrl1）需放宽。
     const kbdWide = modKeyLabel !== "⌘";
     for (const c of CATEGORIES) {
-      const ico = icon(c.icon, 15, { color: "var(--fg-3)" } as any);
-      const label = h("span", { style: { font: "var(--t-base)", flex: "1", color: "var(--fg-2)" }, text: c.label });
+      const labelText = c.label.replace(" 占用", "").replace("网络 / 端口", "网络").replace("界面应用", "界面").replace("全部进程", "全部");
+      const label = h("span", { style: { font: "var(--t-sm)", color: "var(--fg-2)", whiteSpace: "nowrap" }, text: labelText });
       const key = kbd(`${modKeyLabel}${c.key}`, kbdWide);
-      // 默认隐藏：保留占位（visibility）避免按住修饰键时布局抖动。
       key.style.visibility = "hidden";
       this.navKbds.push(key);
       const btn = h("button", {
         style: {
-          display: "flex", alignItems: "center", gap: "9px", height: "32px",
-          padding: "0 8px", borderRadius: "7px", border: "none", cursor: "pointer",
-          textAlign: "left", background: "transparent",
+          display: "inline-flex", alignItems: "center", gap: "6px", height: "24px",
+          padding: "0 9px", borderRadius: "7px", border: "1px solid transparent",
+          cursor: "pointer", textAlign: "left", background: "transparent", flex: "none",
         },
         on: {
           click: () => this.setCat(c.id),
           mouseenter: () => { if (c.id !== s.cat) btn.style.background = "var(--bg-row-hover)"; },
           mouseleave: () => { if (c.id !== s.cat) btn.style.background = "transparent"; },
         },
-        children: [ico, label, key],
+        children: [label, key],
       });
-      this.sideNavBtns[c.id] = { btn, icon: ico as any, label };
-      navWrap.appendChild(btn);
+      this.categoryBtns[c.id] = { btn, label, key };
+      tabs.appendChild(btn);
     }
-    aside.appendChild(navWrap);
-
-    // 底部系统资源条
-    this.cpuBarVal = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-2)" }, text: "0%" });
-    this.cpuBarFill = h("div", { style: { height: "100%", width: "0%", background: "var(--metric-cpu)", borderRadius: "99px", transition: "width .3s" } });
-    this.memBarVal = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-2)" }, text: "0 MB" });
-    this.memBarFill = h("div", { style: { height: "100%", width: "0%", background: "var(--metric-mem)", borderRadius: "99px", transition: "width .3s" } });
-
-    const sysWrap = h("div", {
-      style: {
-        marginTop: "auto", padding: "10px 8px 4px", borderTop: "1px solid var(--border-1)",
-        display: "flex", flexDirection: "column", gap: "8px",
-      },
-      children: [
-        this.sysBar("CPU", this.cpuBarVal, this.cpuBarFill),
-        this.sysBar("内存", this.memBarVal, this.memBarFill),
-      ],
-    });
-    aside.appendChild(sysWrap);
-    return aside;
-  }
-
-  private sysBar(label: string, valEl: HTMLElement, fillEl: HTMLElement): HTMLElement {
-    const track = h("div", {
-      style: { height: "4px", borderRadius: "99px", background: "var(--bg-elev)", overflow: "hidden" },
-      children: [fillEl],
-    });
-    return h("div", {
-      children: [
-        h("div", {
-          style: { display: "flex", justifyContent: "space-between", marginBottom: "5px" },
-          children: [
-            h("span", { className: "t-xs", style: { color: "var(--fg-3)" }, text: label }),
-            valEl,
-          ],
-        }),
-        track,
-      ],
-    });
+    return tabs;
   }
 
   private buildMain(): HTMLElement {
@@ -719,7 +681,7 @@ class ProcKillApp {
 
     this.searchBar = h("div", {
       style: {
-        height: "40px", flex: "none", display: "none", alignItems: "center",
+        height: umode ? "40px" : "36px", flex: "none", display: "flex", alignItems: "center",
         gap: "10px", padding: "0 14px", borderBottom: "1px solid var(--border-1)",
         // uTools 模式整条带 accent 高亮环，表示输入框已绑定（复刻 v7 的 0 0 0 1.5px accent）
         ...(umode ? { boxShadow: "inset 0 0 0 1.5px var(--accent)" } : {}),
@@ -732,7 +694,7 @@ class ProcKillApp {
         h("button", {
           style: { border: "none", background: "transparent", color: "var(--fg-3)", font: "var(--t-xs)", cursor: "pointer", flex: "none" },
           text: "清除 Esc",
-          on: { click: () => { s.searchOn = false; s.query = ""; this.update(); } },
+          on: { click: () => { s.query = ""; this.searchInput.blur(); this.update(); } },
         }),
       ],
     });
@@ -742,17 +704,17 @@ class ProcKillApp {
     const head = h("div", {
       style: {
         display: "grid", gridTemplateColumns: COLS, gap: "6px", alignItems: "center",
-        padding: "0 14px", height: "28px", flex: "none", borderBottom: "1px solid var(--border-1)",
+        padding: "0 12px", height: "24px", flex: "none", borderBottom: "1px solid var(--border-1)",
       },
     });
     head.appendChild(h("span"));
-    head.appendChild(h("span", { className: "t-label", text: "应用 / 进程" }));
-    head.appendChild(h("span", { className: "t-label", style: { textAlign: "right" }, text: "进程" }));
+    head.appendChild(h("span", { className: "t-label", text: "进程 / PID" }));
+    head.appendChild(h("span", { className: "t-label", style: { textAlign: "right" }, text: "数" }));
     this.cpuHdr = this.sortHdr("CPU", "cpu");
     this.memHdr = this.sortHdr("内存", "mem");
     head.appendChild(this.cpuHdr);
     head.appendChild(this.memHdr);
-    head.appendChild(h("span", { className: "t-label", style: { textAlign: "right" }, text: "PID" }));
+    head.appendChild(h("span", { className: "t-label", style: { textAlign: "right" }, text: "操作" }));
     main.appendChild(head);
 
     // 列表滚动区（持久）
@@ -799,10 +761,11 @@ class ProcKillApp {
       ] });
 
     this.footerSelName = h("span", { className: "t-xs", style: { color: "var(--fg-3)", display: "none" } });
+    this.footerStats = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", whiteSpace: "nowrap" }, text: "tauri · utools" });
     this.footerKillBtn = h("span", {
       style: {
         display: "inline-flex", alignItems: "center", gap: "6px", height: "24px",
-        padding: "0 9px", borderRadius: "7px", background: "var(--danger)", color: "#fff",
+        padding: "0 9px", borderRadius: "7px", background: "var(--danger)", color: "var(--fg-on-accent)",
         font: "var(--t-xs)", fontWeight: "600", flex: "none", cursor: "default", opacity: "0.5",
       },
       on: { click: () => this.tryKill(this.selApp) },
@@ -811,15 +774,15 @@ class ProcKillApp {
 
     const right = h("span", {
       style: { marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: "8px", whiteSpace: "nowrap" },
-      children: [this.footerSelName, this.footerKillBtn],
+      children: [this.footerStats, this.footerSelName, this.footerKillBtn],
     });
 
     return h("footer", {
       style: {
-        height: "38px", flex: "none", display: "flex", alignItems: "center", gap: "16px",
-        padding: "0 14px", borderTop: "1px solid var(--border-1)", background: "var(--bg-sidebar)",
+        height: "30px", flex: "none", display: "flex", alignItems: "center", gap: "14px",
+        padding: "0 12px", borderTop: "1px solid var(--border-1)", background: "var(--bg-sidebar)",
       },
-      children: [hint("↑↓", "选择"), hint("␣", "展开"), hint("⏎", "结束进程"), hint("⌘1–6", "分类"), right],
+      children: [hint("j / k", "移动"), hint("␣", "展开/合并"), hint("⏎", "结束进程"), hint("/", "过滤"), hint(`${modKeyLabel}1–6`, "分类"), right],
     });
   }
 
@@ -834,7 +797,7 @@ class ProcKillApp {
     if (s.sel >= v.length) s.sel = Math.max(0, v.length - 1);
 
     this.updateHeader(v);
-    this.updateSidebar();
+    this.updateTabs();
     this.updateSearchBar();
     this.updateList(v);
     this.updateFooter();
@@ -843,8 +806,10 @@ class ProcKillApp {
 
   private updateHeader(v: AppRow[]): void {
     const s = this.s;
-    this.titleText.textContent = CATEGORIES.find((c) => c.id === s.cat)!.label;
-    this.countBadge.textContent = String(v.length);
+    this.titleText.textContent = "鹅的监控";
+    const totalProcs = v.reduce((sum, row) => sum + row.procs, 0);
+    const catLabel = CATEGORIES.find((c) => c.id === s.cat)!.label;
+    this.countBadge.textContent = `${v.length} 应用 · ${totalProcs} 进程 · ${catLabel}`;
 
     // 主题按钮：深色态显示太阳（点击切到浅色），浅色态显示月亮（点击切到深色）。仅图标变化时重建。
     const wantIcon = s.theme === "dark" ? "sun" : "moon";
@@ -883,28 +848,24 @@ class ProcKillApp {
     }
   }
 
-  private updateSidebar(): void {
+  private updateTabs(): void {
     const s = this.s;
     for (const c of CATEGORIES) {
-      const ref = this.sideNavBtns[c.id];
+      const ref = this.categoryBtns[c.id];
       const on = c.id === s.cat;
       ref.btn.style.background = on ? "var(--bg-row-sel)" : "transparent";
-      (ref.icon as HTMLElement).style.color = on ? "var(--accent)" : "var(--fg-3)";
+      ref.btn.style.borderColor = on ? "var(--border-2)" : "transparent";
       ref.label.style.color = on ? "var(--fg-1)" : "var(--fg-2)";
     }
     const stats = s.stats;
     const cpuPct = stats ? Math.round(stats.cpuPercent) : 0;
     const memUsed = stats ? stats.memUsedMb : 0;
-    const memTotal = stats ? stats.memTotalMb : 16384;
-    this.cpuBarVal.textContent = cpuPct + "%";
-    this.cpuBarFill.style.width = Math.min(100, cpuPct) + "%";
-    this.memBarVal.textContent = fmtMem(memUsed);
-    this.memBarFill.style.width = Math.min(100, (memUsed / memTotal) * 100) + "%";
+    if (this.footerStats) this.footerStats.textContent = `${this.bridge.name} · CPU ${cpuPct}% · 内存 ${fmtMem(memUsed)}`;
   }
 
   private updateSearchBar(): void {
     const s = this.s;
-    this.searchBar.style.display = s.searchOn ? "flex" : "none";
+    this.searchBar.style.display = "flex";
     // 仅当值不同步时写入，避免打断输入法/光标
     if (this.searchInput.value !== s.query) this.searchInput.value = s.query;
   }
@@ -995,24 +956,23 @@ class ProcKillApp {
     });
 
     const iconHolder = h("span", { style: { display: "inline-flex" } });
-    const nameLine = h("div", { className: "t-row", style: { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } });
-    const pathLine = h("div", { className: "t-path", style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } });
-    const nameBox = h("div", { style: { minWidth: "0" }, children: [nameLine, pathLine] });
-    const nameCol = h("div", { style: { display: "flex", alignItems: "center", gap: "11px", minWidth: "0" }, children: [iconHolder, nameBox] });
+    const nameLine = h("div", { className: "t-sm", style: { color: "var(--fg-1)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: "0" } });
+    const pathLine = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", flex: "none" } });
+    const nameCol = h("div", { style: { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" }, children: [iconHolder, nameLine, pathLine] });
 
     const procWrap = h("div", { style: { textAlign: "right" } });
-    const cpuVal = h("div", { className: "t-mono", style: { fontSize: "12px" } });
+    const cpuVal = h("span", { className: "t-mono", style: { fontSize: "11px", minWidth: "44px", textAlign: "right" } });
     const cpuMeter = h("div", { style: { display: "inline-flex", justifyContent: "flex-end", width: "100%" } });
-    const cpuCol = h("div", { style: { textAlign: "right" }, children: [cpuVal, cpuMeter] });
-    const memVal = h("div", { className: "t-mono", style: { fontSize: "12px" } });
+    const cpuCol = h("div", { style: { textAlign: "right", display: "flex", alignItems: "center", justifyContent: "flex-end", gap: "6px" }, children: [cpuMeter, cpuVal] });
+    const memVal = h("span", { className: "t-mono", style: { fontSize: "11px", minWidth: "56px", textAlign: "right" } });
     const memMeter = h("div", { style: { display: "inline-flex", justifyContent: "flex-end", width: "100%" } });
-    const memCol = h("div", { style: { textAlign: "right" }, children: [memVal, memMeter] });
+    const memCol = h("div", { style: { textAlign: "right", display: "flex", alignItems: "center", justifyContent: "flex-end", gap: "6px" }, children: [memMeter, memVal] });
     const pidCell = h("div", { style: { textAlign: "right", font: "var(--t-mono-sm)", color: "var(--fg-3)" } });
 
     const row = h("div", {
       style: {
         display: "grid", gridTemplateColumns: COLS, alignItems: "center", gap: "6px",
-        padding: "0 14px", height: "44px", cursor: "pointer", position: "relative",
+        padding: "0 12px", height: "30px", cursor: "pointer", position: "relative",
         background: "transparent",
       },
       on: {
@@ -1080,7 +1040,7 @@ class ProcKillApp {
     // 图标：仅在视觉相关字段（id/sys 尺寸/真实图标/品牌色/字形）变化时重建，平时复用避免重画。
     const iconSig = `${a.id}|${a.sys ? 1 : 0}|${a.iconUrl || ""}|${a.color}|${a.monogram}`;
     if (!ref.iconHolder.firstChild || ref.iconHolder.getAttribute("data-icon-sig") !== iconSig) {
-      ref.iconHolder.replaceChildren(appIcon(a, a.sys ? 22 : 28, a.sys ? 6 : undefined));
+      ref.iconHolder.replaceChildren(appIcon(a, a.sys ? 18 : 18, a.sys ? 5 : 5));
       ref.iconHolder.setAttribute("data-icon-sig", iconSig);
     }
 
@@ -1089,14 +1049,13 @@ class ProcKillApp {
     if (a.port) {
       ref.nameLine.appendChild(h("span", { style: { font: "var(--t-mono-sm)", color: "var(--metric-net)", marginLeft: "8px" }, text: ":" + a.port }));
     }
-    ref.pathLine.replaceChildren(highlight(a.path, q));
+    ref.pathLine.replaceChildren(document.createTextNode(String(a.pid)));
 
     // 进程数
     if (a.procs > 1) {
       ref.procWrap.replaceChildren(h("span", {
         style: {
-          font: "var(--t-mono-sm)", color: "var(--fg-2)", padding: "1px 6px",
-          borderRadius: "5px", background: "var(--bg-elev)", border: "1px solid var(--border-1)",
+          font: "var(--t-mono-sm)", color: "var(--accent)",
           whiteSpace: "nowrap",
         },
         text: "×" + a.procs,
@@ -1107,12 +1066,11 @@ class ProcKillApp {
 
     // CPU / 内存（数值 + 量尺）
     ref.cpuVal.textContent = fmtCpu(a.cpu);
-    ref.cpuMeter.replaceChildren(meter(a.cpu, maxCpu, "var(--metric-cpu)", 3, 58));
+    ref.cpuMeter.replaceChildren(meter(a.cpu, maxCpu, "var(--metric-cpu)", 3, 34));
     ref.memVal.textContent = fmtMem(a.mem);
-    ref.memMeter.replaceChildren(meter(a.mem, maxMem, "var(--metric-mem)", 3, 70));
+    ref.memMeter.replaceChildren(meter(a.mem, maxMem, "var(--metric-mem)", 3, 40));
 
-    // PID
-    ref.pidCell.textContent = String(a.pid);
+    ref.pidCell.textContent = selected ? "⏎ kill" : "";
 
     // 展开的 Helper 行
     if (expanded && a.helpers.length) {
@@ -1126,15 +1084,15 @@ class ProcKillApp {
     const hr = h("div", {
       style: {
         display: "grid", gridTemplateColumns: COLS, alignItems: "center", gap: "6px",
-        padding: "0 14px", height: "30px", background: "var(--bg-helper-row)",
+        padding: "0 12px", height: "26px", background: "var(--bg-helper-row)",
       },
     });
     hr.appendChild(h("span"));
     const cell = h("div", {
       style: { display: "flex", alignItems: "center", gap: "8px", minWidth: "0", paddingLeft: "16px", position: "relative" },
     });
-    cell.appendChild(h("span", { style: { position: "absolute", left: "5px", top: "-15px", width: "1px", height: "30px", background: "var(--border-2)" } }));
-    cell.appendChild(h("span", { style: { position: "absolute", left: "5px", top: "15px", width: "9px", height: "1px", background: "var(--border-2)" } }));
+    cell.appendChild(h("span", { style: { position: "absolute", left: "5px", top: "-13px", width: "1px", height: "26px", background: "var(--border-2)" } }));
+    cell.appendChild(h("span", { style: { position: "absolute", left: "5px", top: "13px", width: "9px", height: "1px", background: "var(--border-2)" } }));
     const hName = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } });
     hName.appendChild(highlight(hp.name, q));
     cell.appendChild(hName);
