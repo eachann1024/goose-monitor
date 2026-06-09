@@ -7,16 +7,27 @@ const path = require("node:path");
 
 const execFileAsync = promisify(execFile);
 
+const IS_WIN = process.platform === "win32";
+const IS_MAC = process.platform === "darwin";
+
+// uTools 启动的 Node 进程常继承空 locale（LANG/LC_ALL 为空）。此时 BSD `ps` 会对进程名/路径里
+// 的非 ASCII 字节做 vis(3) 转义，把「企业微信」(UTF-8 E4 BC 81…) 字面输出成 `M-dM-<M^A…`，
+// 前端直接显示这串乱码。强制一个 UTF-8 locale 即可让 ps 原样透传 UTF-8 字节。
+// mac 用一定存在的 en_US.UTF-8；Linux 用更通用的 C.UTF-8。Windows 走 PowerShell，不受影响。
+const UNIX_ENV = IS_WIN ? process.env : {
+  ...process.env,
+  LC_ALL: IS_MAC ? "en_US.UTF-8" : "C.UTF-8",
+  LANG: IS_MAC ? "en_US.UTF-8" : "C.UTF-8",
+};
+
 // 异步跑 shell 命令（不阻塞事件循环）。失败抛错由调用方兜底。
 function shAsync(cmd, args, maxBuffer) {
   return execFileAsync(cmd, args, {
     encoding: "utf8",
     maxBuffer: maxBuffer || 32 * 1024 * 1024,
+    env: UNIX_ENV,
   }).then((r) => r.stdout);
 }
-
-const IS_WIN = process.platform === "win32";
-const IS_MAC = process.platform === "darwin";
 
 const PALETTE = [
   "#4488F4", "#2C8FE0", "#A259FF", "#5A1F5C", "#2496ED", "#1DB954", "#3A3A3A", "#2BB673",
@@ -59,9 +70,37 @@ function appBundle(exe) {
 function isSystemPath(exe, name) {
   if (!exe) return true;
   if (name === "kernel_task") return true;
-  if (IS_WIN) return /\\windows\\/i.test(exe);
-  return exe.startsWith("/usr/") || exe.startsWith("/sbin/") ||
-    exe.startsWith("/System/Library") || exe.startsWith("/Library/");
+  if (IS_WIN) return /\\windows\\/i.test(exe) || /\\system32\\/i.test(exe);
+  // mac / linux 系统守护进程目录（与 src-tauri/src/process.rs is_system_path 对齐）
+  return exe.startsWith("/usr/sbin/") || exe.startsWith("/usr/libexec/") ||
+    exe.startsWith("/sbin/") || exe.startsWith("/System/") ||
+    exe.startsWith("/Library/") || exe.startsWith("/lib/") || exe.startsWith("/bin/");
+}
+
+// 判断是否界面应用（与 src-tauri/src/process.rs is_gui 对齐）。
+// 关键：macOS 大量系统守护进程也住在 .app bundle 内（如 XProtect、liquiddetectiond、
+// com.apple.* 的 XPC/扩展服务），但它们装在 /System/、/Library/、/usr/ 下，并非用户应用。
+// 仅凭 .app 子串匹配会把它们误判为界面应用 → 漏进 gui 列表。故系统/库目录下的 .app
+// 一律不算用户 GUI 应用。
+function isGui(exe) {
+  if (!exe) return false;
+  if (exe.includes(".app/") || exe.endsWith(".app")) {
+    const inSystemDir = exe.startsWith("/System/") ||
+      exe.startsWith("/Library/") || exe.startsWith("/usr/");
+    return !inSystemDir;
+  }
+  if (IS_WIN) {
+    const low = exe.toLowerCase();
+    return low.includes("\\program files") ||
+      (low.endsWith(".exe") && (low.includes("\\users\\") || low.includes("\\appdata\\")));
+  }
+  // Linux 界面应用常见安装位置，排除工具链/CLI 常驻的 .../bin/ 目录。
+  const isToolchain = exe.includes("/bin/") &&
+    (exe.includes("homebrew") || exe.includes("/rh/") || exe.includes("/node") ||
+     exe.includes("python") || exe.includes("ruby"));
+  if (isToolchain) return false;
+  return exe.includes("/snap/") || exe.includes("/opt/") ||
+    exe.includes("/.local/share/applications") || exe.includes("/usr/share/applications");
 }
 
 /* ---- 真实应用图标抓取（与 Tauri src-tauri/src/icon.rs 同源逻辑的 Node 版）----
@@ -195,6 +234,13 @@ async function rawProcsWin() {
   // CPU% 来自 Win32_PerfFormattedData_PerfProc_Process 的 PercentProcessorTime（已格式化，
   // 无需两次采样），按 IDProcess 关联。再除以逻辑核数归一到 0-100。
   const ps = [
+    // 强制 stdout 为 UTF-8：否则 Win PowerShell 默认用控制台代码页（如 GBK/936）输出，
+    // 中文进程名（如「企业微信」）的 UTF-8 字节会被 Node 的 utf8 解码读成乱码
+    // （表现为 M-dM-<M-^A… 这类 latin1 风格高位字节）。与下方 shAsync 的 encoding:"utf8" 对齐。
+    // try/catch：stdout 被重定向到管道（execFile 即如此）时，PS 5.x 设 OutputEncoding 可能抛
+    // 「handle is invalid」，吞掉即可，不让采集整体失败。
+    "try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {};",
+    "$OutputEncoding = [Text.UTF8Encoding]::new($false);",
     "$cores = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors;",
     "if (-not $cores) { $cores = 1 }",
     "$perf = @{};",
@@ -228,10 +274,14 @@ function merge(raw) {
   const groups = new Map();
   for (const p of raw) {
     const ab = appBundle(p.exe);
-    let key, display, bundle, sys;
-    if (ab) { key = "app:" + ab.bundle; display = ab.name; bundle = ab.bundle; sys = false; }
-    else if (p.exe) { key = "exe:" + p.exe; display = p.name; bundle = p.exe; sys = isSystemPath(p.exe, p.name); }
-    else { key = "name:" + p.name; display = p.name; bundle = ""; sys = true; }
+    // gui：分组键命中 app bundle 即视为界面进程候选（与后端 collect_raw 一致，
+    // 系统目录下 .app 的最终排除交由 listByCategory 的 isGui 把关）；否则按 exe 路径判定。
+    let key, display, bundle, gui;
+    if (ab) { key = "app:" + ab.bundle; display = ab.name; bundle = ab.bundle; gui = true; }
+    else if (p.exe) { key = "exe:" + p.exe; display = p.name; bundle = p.exe; gui = isGui(p.exe); }
+    else { key = "name:" + p.name; display = p.name; bundle = ""; gui = false; }
+    // 后端口径：is_sys = is_system_path && !gui（住在系统目录但属界面应用的不算系统进程）
+    const sys = isSystemPath(p.exe, p.name) && !gui;
     if (!groups.has(key)) groups.set(key, { display, bundle, members: [], sys });
     groups.get(key).members.push(p);
   }
@@ -300,9 +350,10 @@ async function listByCategory(category) {
   }
 
   if (category === "gui") {
-    let g = rows.filter((r) => /\.app/.test(r.path) || /Program Files/i.test(r.path));
-    if (!g.length) g = rows.filter((r) => !r.sys);
-    rows = g;
+    // 与 src-tauri/src/process.rs list_by_category 对齐：界面应用 = isGui(路径) 且非系统进程。
+    // 不再用宽松的 /\.app/ 子串匹配——系统守护进程（com.apple.* 等）也住在 .app 内，
+    // isGui 已据系统目录把它们排除，绕过去会把它们漏回 gui 列表。
+    rows = rows.filter((r) => isGui(r.path) && !r.sys);
   } else if (category === "bg") {
     rows = rows.filter((r) => r.sys);
   } else if (category === "cpu") {
@@ -476,9 +527,28 @@ window.services = {
     }, 100);
   }
 
+  // 接管 uTools 顶部子输入框为我们的搜索框：顶部输入 → 实时过滤前端列表。
+  // 关键：setSubInput 必须在 onPluginEnter 回调内调用、且每次进入都重新设置——
+  // uTools 的机制是"进入插件后主输入框才变子输入框"，在 IIFE 顶层提前注册不可靠，
+  // 会导致子输入框不显示（参考 goose-note preload.cjs 的实现）。第三参 true=聚焦。
+  function installSubInput() {
+    if (typeof utools.setSubInput !== "function") return;
+    try {
+      utools.setSubInput(({ text }) => {
+        if (typeof window.__prockillSubInput === "function") {
+          try { window.__prockillSubInput(text || ""); } catch (e) { console.error("[ProcKill] __prockillSubInput 调用失败", e); }
+        }
+      }, "过滤应用或进程…", true);
+    } catch (e) {
+      console.error("[ProcKill] setSubInput 失败", e);
+    }
+  }
+
   // 监听插件进入：text（关键词/无参进入）→ 空词仅展开；regex/over（带词进入）→ 带搜索词
   if (typeof utools.onPluginEnter === "function") {
     utools.onPluginEnter((entry) => {
+      // 每次进入都重新接管子输入框（uTools 退出/再进会清掉上次的 subInput）
+      installSubInput();
       // 兜底：个别 uTools 版本/异常路径可能传 undefined/null，避免解构直接抛错导致接入失效。
       const { type, payload } = entry || {};
       const keyword = (type === "regex" || type === "over") ? extractKeyword(payload) : "";
@@ -488,18 +558,17 @@ window.services = {
         try { utools.setSubInputValue(keyword); } catch (e) { /* 子输入框可能尚未就绪，忽略 */ }
       }
     });
+  } else {
+    // 极少数无 onPluginEnter 的环境，退化为顶层注册一次
+    installSubInput();
   }
 
-  // 接管 uTools 子输入框为我们的搜索框：顶部输入 → 实时过滤前端列表
-  if (typeof utools.setSubInput === "function") {
-    try {
-      utools.setSubInput(({ text }) => {
-        if (typeof window.__prockillSubInput === "function") {
-          try { window.__prockillSubInput(text || ""); } catch (e) { console.error("[ProcKill] __prockillSubInput 调用失败", e); }
-        }
-      }, "过滤应用或进程…");
-    } catch (e) {
-      console.error("[ProcKill] setSubInput 失败", e);
-    }
+  // 插件退出时移除子输入框接管，避免残留到其它插件/主界面
+  if (typeof utools.onPluginOut === "function") {
+    utools.onPluginOut(() => {
+      if (typeof utools.removeSubInput === "function") {
+        try { utools.removeSubInput(); } catch (e) { /* 忽略 */ }
+      }
+    });
   }
 })();

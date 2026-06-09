@@ -2,6 +2,7 @@
    产物结构：index.html + assets/ + preload.js + plugin.json + logo.png
    用法：npm run utools:build （会先 vite build --mode utools） */
 import { cpSync, mkdirSync, rmSync, existsSync, copyFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -45,12 +46,18 @@ if (!isDebug) {
 copyFileSync(resolve(utoolsDir, "preload.js"), resolve(out, "preload.js"));
 copyFileSync(resolve(utoolsDir, "plugin.json"), resolve(out, "plugin.json"));
 
-// 3. logo：复用 Tauri 图标
+// 3. logo：复用 Tauri 图标（512×512），uTools 要求 logo ≤ 256×256，故用 sips 缩放后再写入。
 const logoSrc = resolve(root, "src-tauri/icons/icon.png");
+const logoOut = resolve(out, "logo.png");
 if (existsSync(logoSrc)) {
-  copyFileSync(logoSrc, resolve(out, "logo.png"));
+  try {
+    execFileSync("sips", ["-z", "256", "256", logoSrc, "--out", logoOut], { stdio: "ignore" });
+  } catch (_) {
+    // sips 不可用（非 macOS）时退化为直接拷贝，发布前需自行确保尺寸 ≤256。
+    copyFileSync(logoSrc, logoOut);
+  }
 } else {
-  writeFileSync(resolve(out, "logo.png"), ""); // 占位，避免缺文件
+  writeFileSync(logoOut, ""); // 占位，避免缺文件
 }
 
 // 4. 明确声明 CommonJS，保证 preload.js 在任何 Node 加载器下都按 CJS 解析

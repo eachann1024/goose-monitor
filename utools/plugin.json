@@ -1,7 +1,7 @@
 {
   "name": "prockill",
   "pluginName": "鹅的监控 进程管理器",
-  "description": "界面化的进程管理器：界面应用/进程列表、Helper 合并、键盘流结束进程",
+  "description": "键盘优先的跨平台进程管理器。自动归并 Chrome、VS Code 等应用的子进程，汇总真实资源占用；↑↓浏览，/ 搜索，⏎ 结束，⌘1–6 切分类，比活动监视器更快、更懂你。",
   "author": "鹅的监控",
   "homepage": "https://github.com/",
   "version": "0.1.0",
@@ -12,7 +12,7 @@
     {
       "code": "prockill",
       "explain": "打开 鹅的监控 进程管理器",
-      "cmds": ["prockill", "进程", "进程管理", "进程管理器", "结束进程", "杀进程", "任务管理器", "内存", "pk", "kill"]
+      "cmds": ["进程管理", "结束进程", "任务管理器", "内存占用", "prockill"]
     },
     {
       "code": "prockill-search",

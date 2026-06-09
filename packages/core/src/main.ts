@@ -110,6 +110,9 @@ class ProcKillApp {
   constructor(root: HTMLElement) {
     this.root = root;
     this.bridge = detectBridge();
+    // uTools 插件窗口高度由宿主动态决定，height:100% 链可能塌缩导致列表滚不动；
+    // 打上标记后 CSS 改用 100vh 固定视口高度，确保滚动区能正确收敛并响应滚轮。
+    if (this.bridge.name === "utools") document.body.classList.add("utools");
     const { theme, auto } = this.resolveInitialTheme();
     this.s = {
       cat: "gui",
@@ -502,15 +505,6 @@ class ProcKillApp {
 
     this.sortMenuWrap = h("div", { style: { position: "relative" }, children: [this.sortBtn] });
 
-    const treeBadge = h("span", {
-      style: {
-        display: "inline-flex", alignItems: "center", gap: "5px", height: "26px",
-        padding: "0 9px", borderRadius: "7px", background: "var(--bg-elev)",
-        border: "1px solid var(--border-1)", color: "var(--fg-2)", font: "var(--t-mono-sm)",
-      },
-      children: [icon("git-branch", 12), document.createTextNode("树形")],
-    });
-
     const searchBtn = h("button", {
       attrs: { title: "搜索 ⌘F" },
       style: {
@@ -546,7 +540,7 @@ class ProcKillApp {
 
     const right = h("div", {
       style: { display: "flex", alignItems: "center", gap: "8px" },
-      children: [treeBadge, this.sortMenuWrap, searchBtn, this.themeBtn, refreshBtn],
+      children: [this.sortMenuWrap, searchBtn, this.themeBtn, refreshBtn],
     });
 
     return h("header", {
@@ -644,7 +638,10 @@ class ProcKillApp {
     const s = this.s;
     const main = h("main", {
       style: {
-        flex: "1", minWidth: "0", display: "flex", flexDirection: "column",
+        // minHeight:0 解除 flex item 默认 min-height:auto，
+        // 否则内容超高时 .scroll 会被撑开而非内部滚动（uTools Chromium 严格遵守规范，故仅此处复现）。
+        flex: "1", minWidth: "0", minHeight: "0", overflow: "hidden",
+        display: "flex", flexDirection: "column",
         background: "var(--bg-panel)",
       },
     });
@@ -660,23 +657,13 @@ class ProcKillApp {
       on: { input: (e) => { s.query = (e.target as HTMLInputElement).value; s.sel = 0; this.update(); } },
     }) as HTMLInputElement;
 
-    // uTools 模式：搜索栏左侧「鹅的监控」插件标签（复刻 v7 subInput 条）
-    this.searchBadge = h("span", {
-      style: {
-        display: umode ? "inline-flex" : "none", alignItems: "center", gap: "7px",
-        height: "26px", padding: "0 9px 0 6px", borderRadius: "7px",
-        background: "var(--bg-row-sel)", border: "1px solid var(--border-2)", flex: "none",
-      },
-      children: [
-        appIcon({ id: "__brand", name: "鹅的监控", monogram: "鹅", color: "#F5B544", procs: 1, cpu: 0, mem: 0, pid: 0, path: "", helpers: [], iconUrl: BRAND_ICON_URL } as AppRow, 16, 5),
-        h("span", { className: "t-sm", style: { color: "var(--fg-1)", fontWeight: "600" }, text: "鹅的监控" }),
-      ],
-    });
+    // uTools 模式不显示搜索栏左侧品牌标签，让搜索框占满整行。
+    this.searchBadge = h("span", { style: { display: "none" } });
 
     // uTools 模式：右侧「uTools 输入框已接管」accent 标识
     this.searchTakeover = h("span", {
       className: "t-xs",
-      style: { display: umode ? "inline-flex" : "none", alignItems: "center", color: "var(--accent)", fontWeight: "600", flex: "none" },
+      style: { display: umode ? "inline-flex" : "none", alignItems: "center", color: "var(--fg-3)", fontWeight: "600", flex: "none" },
       text: "uTools 输入框已接管",
     });
 
@@ -684,12 +671,10 @@ class ProcKillApp {
       style: {
         height: umode ? "40px" : "36px", flex: "none", display: "flex", alignItems: "center",
         gap: "10px", padding: "0 14px", borderBottom: "1px solid var(--border-1)",
-        // uTools 模式整条带 accent 高亮环，表示输入框已绑定（复刻 v7 的 0 0 0 1.5px accent）
-        ...(umode ? { boxShadow: "inset 0 0 0 1.5px var(--accent)" } : {}),
       },
       children: [
         this.searchBadge,
-        icon("search", 14, { color: umode ? "var(--accent)" : "var(--fg-3)" } as any),
+        icon("search", 14, { color: "var(--fg-3)" } as any),
         this.searchInput,
         this.searchTakeover,
         h("button", {
@@ -722,7 +707,7 @@ class ProcKillApp {
     this.scroll = h("div", {
       className: "scroll",
       attrs: { id: "pk-scroll" },
-      style: { flex: "1", overflowY: "auto" },
+      style: { flex: "1 1 auto", minHeight: "0", overflowY: "auto" },
     });
     // 空态/加载态提示（持久，按需显隐）
     this.emptyEl = h("div", {
@@ -757,7 +742,7 @@ class ProcKillApp {
 
   private buildFooter(): HTMLElement {
     const hint = (k: string, t: string) =>
-      h("span", { style: { display: "inline-flex", alignItems: "center", gap: "6px" }, children: [
+      h("span", { style: { display: "inline-flex", alignItems: "center", gap: "6px", flex: "none", whiteSpace: "nowrap" }, children: [
         kbd(k), h("span", { className: "t-xs", style: { color: "var(--fg-3)" }, text: t }),
       ] });
 
@@ -774,8 +759,18 @@ class ProcKillApp {
     });
 
     const right = h("span", {
-      style: { marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: "8px", whiteSpace: "nowrap" },
+      style: { marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: "8px", whiteSpace: "nowrap", flex: "none" },
       children: [this.footerStats, this.footerSelName, this.footerKillBtn],
+    });
+
+    // 左侧快捷键提示：整组可收缩并裁剪，空间不足时优先保证右侧 stats / 结束进程按钮完整。
+    // uTools 窗口偏窄，精简为最关键的几项，避免提示被挤压换行 / 截断。
+    const hints = this.isUtools
+      ? [hint("j / k", "移动"), hint("␣", "展开/合并"), hint("/", "过滤")]
+      : [hint("j / k", "移动"), hint("␣", "展开/合并"), hint("⏎", "结束进程"), hint("/", "过滤"), hint(`${modKeyLabel}1–6`, "分类")];
+    const hintsWrap = h("span", {
+      style: { display: "flex", alignItems: "center", gap: "14px", flex: "1 1 auto", minWidth: "0", overflow: "hidden" },
+      children: hints,
     });
 
     return h("footer", {
@@ -783,7 +778,7 @@ class ProcKillApp {
         height: "30px", flex: "none", display: "flex", alignItems: "center", gap: "14px",
         padding: "0 12px", borderTop: "1px solid var(--border-1)", background: "var(--bg-sidebar)",
       },
-      children: [hint("j / k", "移动"), hint("␣", "展开/合并"), hint("⏎", "结束进程"), hint("/", "过滤"), hint(`${modKeyLabel}1–6`, "分类"), right],
+      children: [hintsWrap, right],
     });
   }
 
@@ -866,7 +861,9 @@ class ProcKillApp {
 
   private updateSearchBar(): void {
     const s = this.s;
-    this.searchBar.style.display = "flex";
+    // uTools 环境：顶部子输入框已由 setSubInput 接管（preload.js），内嵌搜索栏冗余，隐藏之。
+    // 过滤仍由 uTools 顶部输入框经 __prockillSubInput 驱动，体验与独立窗口的 uTools 搜索框一致。
+    this.searchBar.style.display = this.isUtools ? "none" : "flex";
     // 仅当值不同步时写入，避免打断输入法/光标
     if (this.searchInput.value !== s.query) this.searchInput.value = s.query;
   }
