@@ -11,10 +11,24 @@ const isDebug = process.env.GOOSE_DEBUG === "1";
 // ProcKill 前端构建配置。
 // - 普通 / Tauri 模式：构建到 dist/，由 Tauri 或浏览器 dev server 加载。
 // - utools 模式：同样产出 dist/，再由 scripts/build-utools.mjs 包装成 uTools 插件目录。
+// uTools 插件以 file:// 加载，不允许引用任何网络 JS/CSS（发布时会被拒）。
+// 此插件在 utools 构建模式下从 HTML 中删除所有 Google Fonts <link> 标签。
+function stripExternalFonts() {
+  return {
+    name: "strip-external-fonts",
+    transformIndexHtml(html) {
+      return html
+        .replace(/<link[^>]+fonts\.googleapis\.com[^>]*>\s*/g, "")
+        .replace(/<link[^>]+fonts\.gstatic\.com[^>]*>\s*/g, "");
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => ({
   root: coreRoot,
   // uTools 插件用 file:// 加载，必须相对路径；Tauri/浏览器用绝对路径即可。
   base: mode === "utools" ? "./" : "/",
+  plugins: mode === "utools" ? [stripExternalFonts()] : [],
   build: {
     outDir: resolve(__dirname, "dist"),
     emptyOutDir: true,
