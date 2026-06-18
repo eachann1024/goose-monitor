@@ -387,6 +387,14 @@ class ProcKillApp {
       // ⌘F / Ctrl+F / "/" 搜索
       if ((mod && e.key.toLowerCase() === "f") || e.key === "/") {
         e.preventDefault();
+        // uTools 环境：内嵌搜索栏已隐藏、搜索由宿主子输入框接管，
+        // 故把焦点交还给 uTools 子输入框（subInputSelect = 聚焦并选中已有内容）。
+        if (this.isUtools) {
+          const u = (window as any).utools;
+          if (typeof u?.subInputSelect === "function") u.subInputSelect();
+          else if (typeof u?.subInputFocus === "function") u.subInputFocus();
+          return;
+        }
         this.setSearch(s.query, true);
         return;
       }
