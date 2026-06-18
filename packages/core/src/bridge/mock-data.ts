@@ -36,8 +36,11 @@ const APP_SEEDS: Seed[] = [
     ],
   },
   { id: "figma", name: "Figma", monogram: "Fg", color: "#A259FF", pid: 1455, path: "/Applications/Figma.app", cpuBase: 6.8, memBase: 1040, helpers: [] },
+  { id: "wechat", name: "微信", monogram: "微", color: "#2DC100", pid: 1500, path: "/Applications/WeChat.app", cpuBase: 1.8, memBase: 884, helpers: [] },
   { id: "slack", name: "Slack", monogram: "Sl", color: "#5A1F5C", pid: 1622, path: "/Applications/Slack.app", cpuBase: 4.1, memBase: 845, helpers: [] },
+  { id: "qq", name: "QQ", monogram: "Q", color: "#12B7F5", pid: 1700, path: "/Applications/QQ.app", cpuBase: 1.1, memBase: 562, helpers: [] },
   { id: "docker", name: "Docker Desktop", monogram: "Dk", color: "#2496ED", pid: 760, path: "/Applications/Docker.app", cpuBase: 8.9, memBase: 1640, helpers: [] },
+  { id: "netease", name: "网易云音乐", monogram: "云", color: "#C20C0C", pid: 1950, path: "/Applications/NeteaseMusic.app", cpuBase: 0.9, memBase: 430, helpers: [] },
   { id: "spotify", name: "Spotify", monogram: "Sp", color: "#1DB954", pid: 2010, path: "/Applications/Spotify.app", cpuBase: 1.2, memBase: 412, helpers: [] },
   { id: "notion", name: "Notion", monogram: "N", color: "#3A3A3A", pid: 1890, path: "/Applications/Notion.app", cpuBase: 2.0, memBase: 690, helpers: [] },
   { id: "iterm", name: "iTerm2", monogram: "iT", color: "#2BB673", pid: 540, path: "/Applications/iTerm.app", cpuBase: 2.3, memBase: 230, helpers: [] },
@@ -60,6 +63,24 @@ function jitter(base: number, ratio: number, max: number): number {
   return Math.max(0, Math.min(max, base + delta));
 }
 
+// 固定 idle 映射表，贴近设计稿演示效果（阈值60分钟时 wechat/qq/spotify/notion 进"将自动退出"区）。
+// 命中 id 用固定值，命中不到再用旧逻辑兜底。
+const FIXED_IDLE: Record<string, number> = {
+  chrome: 1,
+  code: 0,
+  wechat: 96,
+  slack: 38,
+  qq: 71,
+  docker: 14,
+  figma: 27,
+  netease: 12,
+  spotify: 103,
+  notion: 52,
+  iterm: 6,
+  music: 44,
+  finder: 8,
+};
+
 function buildRow(seed: Seed): AppRow {
   const helpers: Helper[] = seed.helpers.map((h) => ({
     name: h.name, role: h.role, pid: h.pid,
@@ -74,9 +95,11 @@ function buildRow(seed: Seed): AppRow {
     ? helpers.reduce((a, h) => a + h.mem, 0)
     : Math.round(jitter(seed.memBase, 0.04, 1e9));
   const procs = helpers.length || 1;
-  // 模拟空闲时长：低占用（CPU<1%）的应用给一个较大的空闲分钟数，便于演示「自动清理」；
-  // 其余视为活跃（0）。真实环境由 Rust IdleTracker 提供。
-  const idleMinutes = cpu < 1 ? 35 + Math.round(Math.random() * 40) : 0;
+  // 空闲时长：优先查固定映射表（保证演示效果稳定），命中不到再用旧逻辑兜底。
+  // 真实环境由 Rust IdleTracker 提供，此处仅为浏览器预览用。
+  const idleMinutes = seed.id in FIXED_IDLE
+    ? FIXED_IDLE[seed.id]
+    : (cpu < 1 ? 35 + Math.round(Math.random() * 40) : 0);
   return {
     id: seed.id, name: seed.name, monogram: seed.monogram, color: seed.color,
     procs, cpu, mem, pid: seed.pid, path: seed.path, helpers,
