@@ -9,9 +9,10 @@
 import "./styles_guard";
 import { detectBridge, type PlatformBridge } from "./bridge";
 import type { AppRow, CategoryId, SystemStats } from "./types";
+import { layoutForCat, metricHdrLabel, type MetricCol } from "./category-layout";
 import { CATEGORIES, fmtMem, fmtCpu, modKeyLabel, isModKey } from "./shared";
 import { icon } from "./icons";
-import { appIcon, meter, kbd, h, highlight } from "./atoms";
+import { appIcon, meter, kbd, enterKey, h, highlight } from "./atoms";
 // 应用品牌图标（鹅的监控）——vite 处理为可用 URL，用于 uTools 插件标签等品牌位
 import BRAND_ICON_URL from "../assets/app-icon.png";
 import {
@@ -34,8 +35,7 @@ const SORTS: [SortKey, string][] = [
   ["mem", "内存"], ["cpu", "CPU"], ["procs", "进程数"], ["name", "名称"],
 ];
 
-// 行网格列宽（复刻设计稿 v5 compact COLS）
-const COLS = "16px 1fr 52px 96px 110px 56px";
+// 列布局：category-layout.ts（每 tab 一套列）
 const REFRESH_MS = 2000;
 
 interface State {
@@ -104,11 +104,11 @@ class ProcKillApp {
   private searchBar!: HTMLElement;
   private searchInput!: HTMLInputElement;
   private scroll!: HTMLElement;
+  private headGrid!: HTMLElement;
   private emptyEl!: HTMLElement;
   private footerSelName!: HTMLElement;
   private footerKillBtn!: HTMLElement;
   private dialogLayer!: HTMLElement;     // 弹窗挂载层（持久，内容按需填充）
-  private cpuHdr!: HTMLElement; private memHdr!: HTMLElement;
   private themeBtn!: HTMLElement;        // 主题切换按钮
   private searchBadge!: HTMLElement;     // uTools 模式下：搜索栏左侧「鹅的监控」插件标签
   private searchTakeover!: HTMLElement;  // uTools 模式下：「uTools 输入框已接管」标识
@@ -309,9 +309,37 @@ class ProcKillApp {
     this.update();
   }
 
+  private rebuildListHeader(): void {
+    const lay = layoutForCat(this.s.cat);
+    this.headGrid.style.gridTemplateColumns = lay.gridTemplate;
+    this.headGrid.replaceChildren();
+    this.headGrid.appendChild(h("span"));
+    this.headGrid.appendChild(h("span", { className: "t-label", text: lay.nameHdr }));
+    for (const m of lay.metrics) {
+      if (m === "cpu" || m === "mem") {
+        this.headGrid.appendChild(this.sortHdr(metricHdrLabel(m), m));
+      } else {
+        const align = m === "path" ? "left" : "right";
+        this.headGrid.appendChild(h("span", {
+          className: "t-label",
+          style: { textAlign: align },
+          text: metricHdrLabel(m),
+        }));
+      }
+    }
+    this.headGrid.appendChild(h("span", { className: "t-label", style: { textAlign: "right" }, text: "操作" }));
+  }
+
+  private refreshGridLayout(): void {
+    this.rebuildListHeader();
+    const cols = layoutForCat(this.s.cat).gridTemplate;
+    for (const [, ref] of this.rows) ref.row.style.gridTemplateColumns = cols;
+  }
+
   private setCat(cat: CategoryId): void {
     if (cat === this.s.cat) return;
     this.s.cat = cat;
+    this.refreshGridLayout();
     this.s.sel = 0;
     this.s.menuOpen = false;
     this.s.loading = true;
@@ -352,7 +380,7 @@ class ProcKillApp {
   // ---------- 键盘 ----------
   /** 按住主修饰键时显示分类角标，松开/失焦时隐藏。 */
   private setNavKbdVisible(on: boolean): void {
-    for (const k of this.navKbds) k.style.visibility = on ? "visible" : "hidden";
+    this.win.classList.toggle("mod-hint", on);
   }
 
   private installKeys(): void {
@@ -368,6 +396,21 @@ class ProcKillApp {
         const dlg = s.dialogApp;
         if (e.key === "Escape") { e.preventDefault(); s.dialogApp = null; this.update(); }
         else if (e.key === "Enter") { e.preventDefault(); this.doKill(dlg); }
+        return;
+      }
+      // Tab：在分类 tab 间循环（不在输入框、未按修饰键时）
+      if (
+        e.key === "Tab" &&
+        !mod &&
+        !e.altKey &&
+        document.activeElement !== this.searchInput
+      ) {
+        e.preventDefault();
+        const idx = CATEGORIES.findIndex((c) => c.id === s.cat);
+        const next = e.shiftKey
+          ? (idx - 1 + CATEGORIES.length) % CATEGORIES.length
+          : (idx + 1) % CATEGORIES.length;
+        this.setCat(CATEGORIES[next].id);
         return;
       }
       // ⌘1–6 / Ctrl1–6 切分类（Windows/Linux 用 Ctrl，已由 e.ctrlKey 覆盖）
@@ -602,6 +645,7 @@ class ProcKillApp {
   private buildCategoryTabs(): HTMLElement {
     const s = this.s;
     const tabs = h("div", {
+      className: "pk-cat-tabs",
       style: {
         height: "34px", flex: "none", display: "flex", alignItems: "center", gap: "4px",
         padding: "0 12px", borderBottom: "1px solid var(--border-1)",
@@ -613,8 +657,7 @@ class ProcKillApp {
     for (const c of CATEGORIES) {
       const labelText = c.label.replace(" 占用", "").replace("网络 / 端口", "网络").replace("界面应用", "界面").replace("全部进程", "全部");
       const label = h("span", { style: { font: "var(--t-sm)", color: "var(--fg-2)", whiteSpace: "nowrap" }, text: labelText });
-      const key = kbd(`${modKeyLabel}${c.key}`, kbdWide);
-      key.style.visibility = "hidden";
+      const key = kbd(`${modKeyLabel}${c.key}`, kbdWide, "pk-cat-kbd");
       this.navKbds.push(key);
       const btn = h("button", {
         style: {
@@ -687,22 +730,15 @@ class ProcKillApp {
     });
     main.appendChild(this.searchBar);
 
-    // 列头
-    const head = h("div", {
+    // 列头（按分类 tab 重建列）
+    this.headGrid = h("div", {
       style: {
-        display: "grid", gridTemplateColumns: COLS, gap: "6px", alignItems: "center",
+        display: "grid", gap: "6px", alignItems: "center",
         padding: "0 12px", height: "24px", flex: "none", borderBottom: "1px solid var(--border-1)",
       },
     });
-    head.appendChild(h("span"));
-    head.appendChild(h("span", { className: "t-label", text: "进程 / PID" }));
-    head.appendChild(h("span", { className: "t-label", style: { textAlign: "right" }, text: "数" }));
-    this.cpuHdr = this.sortHdr("CPU", "cpu");
-    this.memHdr = this.sortHdr("内存", "mem");
-    head.appendChild(this.cpuHdr);
-    head.appendChild(this.memHdr);
-    head.appendChild(h("span", { className: "t-label", style: { textAlign: "right" }, text: "操作" }));
-    main.appendChild(head);
+    main.appendChild(this.headGrid);
+    this.rebuildListHeader();
 
     // 列表滚动区（持久）
     this.scroll = h("div", {
@@ -742,21 +778,18 @@ class ProcKillApp {
   }
 
   private buildFooter(): HTMLElement {
-    const hint = (k: string, t: string) =>
+    const hint = (key: string | HTMLElement, t: string) =>
       h("span", { style: { display: "inline-flex", alignItems: "center", gap: "6px", flex: "none", whiteSpace: "nowrap" }, children: [
-        kbd(k), h("span", { className: "t-xs", style: { color: "var(--fg-3)" }, text: t }),
+        typeof key === "string" ? kbd(key) : key,
+        h("span", { className: "t-xs", style: { color: "var(--fg-3)" }, text: t }),
       ] });
 
     this.footerSelName = h("span", { className: "t-xs", style: { color: "var(--fg-3)", display: "none" } });
     this.footerStats = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", whiteSpace: "nowrap" }, text: "tauri · utools" });
     this.footerKillBtn = h("span", {
-      style: {
-        display: "inline-flex", alignItems: "center", gap: "6px", height: "24px",
-        padding: "0 9px", borderRadius: "7px", background: "var(--danger)", color: "var(--fg-on-accent)",
-        font: "var(--t-xs)", fontWeight: "600", flex: "none", cursor: "default", opacity: "0.5",
-      },
+      className: "pk-footer-close",
       on: { click: () => this.tryKill(this.selApp) },
-      children: [document.createTextNode("结束进程 "), kbd("⏎")],
+      children: [document.createTextNode("关闭 "), enterKey()],
     });
 
     const right = h("span", {
@@ -768,7 +801,7 @@ class ProcKillApp {
     // uTools 窗口偏窄，精简为最关键的几项，避免提示被挤压换行 / 截断。
     const hints = this.isUtools
       ? [hint("j / k", "移动"), hint("␣", "展开/合并"), hint("/", "过滤")]
-      : [hint("j / k", "移动"), hint("␣", "展开/合并"), hint("⏎", "结束进程"), hint("/", "过滤"), hint(`${modKeyLabel}1–6`, "分类")];
+      : [hint("j / k", "移动"), hint("␣", "展开/合并"), hint(enterKey(), "关闭"), hint("/", "过滤"), hint(`${modKeyLabel}1–6`, "分类")];
     const hintsWrap = h("span", {
       style: { display: "flex", alignItems: "center", gap: "14px", flex: "1 1 auto", minWidth: "0", overflow: "hidden" },
       children: hints,
@@ -838,14 +871,17 @@ class ProcKillApp {
       existing.replaceWith(m);
     }
 
-    // 列头高亮 + 箭头
-    for (const hdr of [this.cpuHdr, this.memHdr]) {
-      const key = hdr.getAttribute("data-key") as SortKey;
+    // 列头高亮 + 箭头（仅可排序的 CPU/内存列）
+    for (const hdr of this.headGrid.querySelectorAll("button[data-key]")) {
+      const el = hdr as HTMLElement;
+      const key = el.getAttribute("data-key") as SortKey;
       const active = s.sortKey === key;
-      hdr.style.color = active ? "var(--accent)" : "var(--fg-3)";
-      const arrow = (hdr as any).__arrow as HTMLElement;
-      arrow.style.display = active ? "" : "none";
-      arrow.style.transform = s.sortDir === "asc" ? "scaleY(-1)" : "none";
+      el.style.color = active ? "var(--accent)" : "var(--fg-3)";
+      const arrow = (el as HTMLElement & { __arrow?: HTMLElement }).__arrow;
+      if (arrow) {
+        arrow.style.display = active ? "" : "none";
+        arrow.style.transform = s.sortDir === "asc" ? "scaleY(-1)" : "none";
+      }
     }
   }
 
@@ -945,6 +981,23 @@ class ProcKillApp {
     this.rows.clear();
   }
 
+  private rowCellsForLayout(
+    caret: HTMLElement,
+    nameCol: HTMLElement,
+    procWrap: HTMLElement,
+    cpuCol: HTMLElement,
+    memCol: HTMLElement,
+    pidCell: HTMLElement,
+  ): HTMLElement[] {
+    const map: Record<MetricCol, HTMLElement> = {
+      procs: procWrap, cpu: cpuCol, mem: memCol, port: procWrap, path: procWrap,
+    };
+    const cells: HTMLElement[] = [caret, nameCol];
+    for (const m of layoutForCat(this.s.cat).metrics) cells.push(map[m]);
+    cells.push(pidCell);
+    return cells;
+  }
+
   // 新建一行（结构骨架，值由 updateRow 填）。
   private buildRow(a: AppRow): RowRefs {
     const s = this.s;
@@ -974,7 +1027,7 @@ class ProcKillApp {
 
     const row = h("div", {
       style: {
-        display: "grid", gridTemplateColumns: COLS, alignItems: "center", gap: "6px",
+        display: "grid", gridTemplateColumns: layoutForCat(this.s.cat).gridTemplate, alignItems: "center", gap: "6px",
         padding: "0 12px", height: "30px", cursor: "pointer", position: "relative",
         background: "transparent",
       },
@@ -984,7 +1037,7 @@ class ProcKillApp {
         mouseenter: () => { if (!row.hasAttribute("data-sel")) row.style.background = "var(--bg-row-hover)"; },
         mouseleave: () => { if (!row.hasAttribute("data-sel")) row.style.background = "transparent"; },
       },
-      children: [caret, nameCol, procWrap, cpuCol, memCol, pidCell],
+      children: this.rowCellsForLayout(caret, nameCol, procWrap, cpuCol, memCol, pidCell),
     });
 
     const helperBox = h("div");
@@ -1006,6 +1059,58 @@ class ProcKillApp {
     if (idx >= 0) { this.s.sel = idx; this.update(); }
   }
 
+  private fillMetricCells(
+    ref: RowRefs,
+    a: AppRow,
+    metrics: readonly MetricCol[],
+    maxCpu: number,
+    maxMem: number,
+  ): void {
+    const show = new Set(metrics);
+    const clear = (el: HTMLElement) => { el.replaceChildren(); };
+    if (!show.has("procs") && !show.has("port") && !show.has("path")) clear(ref.procWrap);
+    else if (show.has("port")) {
+      ref.procWrap.style.textAlign = "right";
+      ref.procWrap.replaceChildren(h("span", {
+        style: { font: "var(--t-mono-sm)", color: "var(--metric-net)", whiteSpace: "nowrap" },
+        text: a.port ? ":" + a.port : "—",
+      }));
+    } else if (show.has("path")) {
+      ref.procWrap.style.textAlign = "left";
+      ref.procWrap.replaceChildren(h("span", {
+        style: {
+          font: "var(--t-mono-sm)", color: "var(--fg-3)", overflow: "hidden", textOverflow: "ellipsis",
+          whiteSpace: "nowrap", display: "block",
+        },
+        text: a.path,
+      }));
+    } else if (show.has("procs")) {
+      ref.procWrap.style.textAlign = "right";
+      if (a.procs > 1) {
+        ref.procWrap.replaceChildren(h("span", {
+          style: { font: "var(--t-mono-sm)", color: "var(--accent)", whiteSpace: "nowrap" },
+          text: "×" + a.procs,
+        }));
+      } else {
+        ref.procWrap.replaceChildren(h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-3)" }, text: "×1" }));
+      }
+    }
+    if (show.has("cpu")) {
+      ref.cpuVal.textContent = fmtCpu(a.cpu);
+      ref.cpuMeter.replaceChildren(meter(a.cpu, maxCpu, "var(--metric-cpu)", 3, 34));
+    } else {
+      ref.cpuVal.textContent = "";
+      clear(ref.cpuMeter);
+    }
+    if (show.has("mem")) {
+      ref.memVal.textContent = fmtMem(a.mem);
+      ref.memMeter.replaceChildren(meter(a.mem, maxMem, "var(--metric-mem)", 3, 40));
+    } else {
+      ref.memVal.textContent = "";
+      clear(ref.memMeter);
+    }
+  }
+
   // 更新一行的内容（只在指纹变化时改 DOM）。
   private updateRow(ref: RowRefs, a: AppRow, index: number, selected: boolean, maxCpu: number, maxMem: number): void {
     const s = this.s;
@@ -1019,6 +1124,7 @@ class ProcKillApp {
       selected ? 1 : 0, expanded ? 1 : 0, maxCpu, maxMem,
       a.sys ? 1 : 0, a.iconUrl || "", a.color, a.monogram,
       q, // 搜索词纳入：改词时已渲染行要重画匹配高亮
+      s.cat,
       a.helpers.map((hp) => `${hp.pid}:${hp.cpu}:${hp.mem}:${hp.name}:${hp.role}`).join(","),
     ].join("|");
     if (ref.signature === sig) {
@@ -1047,33 +1153,20 @@ class ProcKillApp {
       ref.iconHolder.setAttribute("data-icon-sig", iconSig);
     }
 
-    // 名称 + 端口（搜索时命中子串品牌色高亮）
+    const lay = layoutForCat(s.cat);
     ref.nameLine.replaceChildren(highlight(a.name, q));
-    if (a.port) {
+    if (a.port && !lay.metrics.includes("port")) {
       ref.nameLine.appendChild(h("span", { style: { font: "var(--t-mono-sm)", color: "var(--metric-net)", marginLeft: "8px" }, text: ":" + a.port }));
     }
-    ref.pathLine.replaceChildren(document.createTextNode(String(a.pid)));
+    ref.pathLine.replaceChildren(document.createTextNode(
+      lay.metrics.includes("path") ? "" : String(a.pid),
+    ));
+    this.fillMetricCells(ref, a, lay.metrics, maxCpu, maxMem);
 
-    // 进程数
-    if (a.procs > 1) {
-      ref.procWrap.replaceChildren(h("span", {
-        style: {
-          font: "var(--t-mono-sm)", color: "var(--accent)",
-          whiteSpace: "nowrap",
-        },
-        text: "×" + a.procs,
-      }));
-    } else {
-      ref.procWrap.replaceChildren(h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-3)" }, text: "×1" }));
+    ref.pidCell.replaceChildren();
+    if (selected) {
+      ref.pidCell.appendChild(h("span", { className: "pk-row-close", children: [enterKey(), document.createTextNode("关闭")] }));
     }
-
-    // CPU / 内存（数值 + 量尺）
-    ref.cpuVal.textContent = fmtCpu(a.cpu);
-    ref.cpuMeter.replaceChildren(meter(a.cpu, maxCpu, "var(--metric-cpu)", 3, 34));
-    ref.memVal.textContent = fmtMem(a.mem);
-    ref.memMeter.replaceChildren(meter(a.mem, maxMem, "var(--metric-mem)", 3, 40));
-
-    ref.pidCell.textContent = selected ? "⏎ kill" : "";
 
     // 展开的 Helper 行
     if (expanded && a.helpers.length) {
@@ -1086,7 +1179,7 @@ class ProcKillApp {
   private buildHelperRow(hp: AppRow["helpers"][number], q: string): HTMLElement {
     const hr = h("div", {
       style: {
-        display: "grid", gridTemplateColumns: COLS, alignItems: "center", gap: "6px",
+        display: "grid", gridTemplateColumns: layoutForCat(this.s.cat).gridTemplate, alignItems: "center", gap: "6px",
         padding: "0 12px", height: "26px", background: "var(--bg-helper-row)",
       },
     });
@@ -1101,9 +1194,15 @@ class ProcKillApp {
     cell.appendChild(hName);
     cell.appendChild(h("span", { style: { font: "var(--t-xs)", color: "var(--fg-3)", padding: "0 5px", borderRadius: "4px", background: "var(--bg-elev)", whiteSpace: "nowrap", flex: "none" }, text: hp.role }));
     hr.appendChild(cell);
-    hr.appendChild(h("span"));
-    hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "right" }, text: fmtCpu(hp.cpu) }));
-    hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "right" }, text: fmtMem(hp.mem) }));
+    for (const m of layoutForCat(this.s.cat).metrics) {
+      if (m === "cpu") {
+        hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "right" }, text: fmtCpu(hp.cpu) }));
+      } else if (m === "mem") {
+        hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "right" }, text: fmtMem(hp.mem) }));
+      } else {
+        hr.appendChild(h("span"));
+      }
+    }
     hr.appendChild(h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", textAlign: "right" }, text: String(hp.pid) }));
     return hr;
   }
@@ -1113,12 +1212,10 @@ class ProcKillApp {
     if (sel) {
       this.footerSelName.textContent = "已选 " + sel.name;
       this.footerSelName.style.display = "";
-      this.footerKillBtn.style.cursor = "pointer";
-      this.footerKillBtn.style.opacity = "1";
+      this.footerKillBtn.classList.add("pk-footer-close--on");
     } else {
       this.footerSelName.style.display = "none";
-      this.footerKillBtn.style.cursor = "default";
-      this.footerKillBtn.style.opacity = "0.5";
+      this.footerKillBtn.classList.remove("pk-footer-close--on");
     }
   }
 
@@ -1189,7 +1286,7 @@ class ProcKillApp {
         this.bridge.setPref("pk_dont_remind", s.dontRemind ? "1" : "0");
         this.update();
       } },
-      children: [checkbox, h("span", { style: { font: "var(--t-sm)", color: "var(--fg-2)" }, text: "以后不再提醒，直接结束进程" })],
+      children: [checkbox, h("span", { style: { font: "var(--t-sm)", color: "var(--fg-2)" }, text: "以后不再提醒，直接关闭" })],
     });
     card.appendChild(label);
 
@@ -1210,7 +1307,7 @@ class ProcKillApp {
         cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "7px",
       },
       on: { click: () => this.doKill(app) },
-      children: [document.createTextNode("结束进程 "), kbd("⏎")],
+      children: [document.createTextNode("关闭 "), enterKey()],
     });
     card.appendChild(h("div", { style: { display: "flex", gap: "10px", marginTop: "20px" }, children: [cancelBtn, killBtn] }));
 

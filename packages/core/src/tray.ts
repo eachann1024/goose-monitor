@@ -17,9 +17,9 @@
 import "./styles_guard";
 import { detectBridge, type PlatformBridge } from "./bridge";
 import type { AppRow } from "./types";
-import { fmtCpu } from "./shared";
+import { fmtCpu, modKeyLabel } from "./shared";
 import { icon } from "./icons";
-import { appIcon, kbd, h } from "./atoms";
+import { appIcon, kbd, enterKeyMod, h } from "./atoms";
 import BRAND_ICON_URL from "../assets/app-icon.png";
 import {
   THEME_PREF_KEY,
@@ -727,9 +727,10 @@ class TrayApp {
   }
 
   private buildFoot(): HTMLElement {
-    const footKey = (k: string, t: string, wide = false) =>
+    const footKey = (k: string | HTMLElement, t: string, wide = false) =>
       h("span", { style: { display: "inline-flex", alignItems: "center", gap: "6px", whiteSpace: "nowrap" }, children: [
-        kbd(k, wide), h("span", { className: "t-xs", style: { color: "var(--fg-3)" }, text: t }),
+        typeof k === "string" ? kbd(k, wide) : k,
+        h("span", { className: "t-xs", style: { color: "var(--fg-3)" }, text: t }),
       ] });
 
     const settingsBtn = h("button", {
@@ -752,7 +753,7 @@ class TrayApp {
         h("div", { style: { display: "flex", alignItems: "center", gap: "11px", flex: "1", minWidth: "0" }, children: [
           footKey("↑↓", "选择"),
           footKey("␣", "勾选"),
-          footKey("⌘⏎", "结束所选", true),
+          footKey(enterKeyMod(modKeyLabel), "结束所选"),
         ] }),
         settingsBtn,
       ],

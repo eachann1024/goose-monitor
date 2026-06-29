@@ -1,6 +1,7 @@
 /* UI 原子：AppIcon / Meter / Kbd —— 内联 style 像素级复刻设计稿 shared.jsx。 */
 import type { AppRow } from "./types";
 import { shade } from "./shared";
+import { icon } from "./icons";
 
 /** 应用图标：优先真实图标 data URL，否则品牌色字形方块（带顶部高光）。 */
 export function appIcon(app: AppRow, size = 28, radius?: number): HTMLElement {
@@ -102,8 +103,9 @@ export function highlight(text: string, query: string): DocumentFragment {
 }
 
 /** 键帽。 */
-export function kbd(text: string, wide = false): HTMLElement {
+export function kbd(text: string, wide = false, className?: string): HTMLElement {
   const el = document.createElement("span");
+  if (className) el.className = className;
   Object.assign(el.style, {
     display: "inline-grid",
     placeItems: "center",
@@ -118,6 +120,46 @@ export function kbd(text: string, wide = false): HTMLElement {
     color: "var(--fg-2)",
   } as Partial<CSSStyleDeclaration>);
   el.textContent = text;
+  return el;
+}
+/** 回车键帽（Lucide corner-down-left），替代 ⏎ 字符。 */
+export function enterKey(wide = false, className?: string): HTMLElement {
+  const el = document.createElement("span");
+  if (className) el.className = className;
+  Object.assign(el.style, {
+    display: "inline-grid",
+    placeItems: "center",
+    minWidth: wide ? "30px" : "18px",
+    height: "18px",
+    padding: "0 4px",
+    borderRadius: "5px",
+    background: "var(--bg-elev)",
+    border: "1px solid var(--border-2)",
+    boxShadow: "0 1px 0 var(--border-strong)",
+    color: "var(--fg-2)",
+  } as Partial<CSSStyleDeclaration>);
+  el.appendChild(icon("corner-down-left", 12));
+  return el;
+}
+/** 修饰键 + 回车图标（如 ⌘↵），用于托盘底栏等。 */
+export function enterKeyMod(modLabel: string): HTMLElement {
+  const el = document.createElement("span");
+  Object.assign(el.style, {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "3px",
+    minWidth: "30px",
+    height: "18px",
+    padding: "0 5px",
+    borderRadius: "5px",
+    background: "var(--bg-elev)",
+    border: "1px solid var(--border-2)",
+    boxShadow: "0 1px 0 var(--border-strong)",
+    font: "var(--t-mono-sm)",
+    color: "var(--fg-2)",
+  } as Partial<CSSStyleDeclaration>);
+  el.appendChild(document.createTextNode(modLabel));
+  el.appendChild(icon("corner-down-left", 11));
   return el;
 }
 

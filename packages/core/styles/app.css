@@ -80,3 +80,71 @@ input { font-family: inherit; }
 @keyframes scrimIn { from { opacity: 0; } to { opacity: 1; } }
 .dialog-card { animation: dialogIn 140ms cubic-bezier(.2,.7,.3,1); }
 @keyframes dialogIn { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: scale(1); } }
+/* 分类 tab 快捷键角标：默认不占位，按住 ⌘/Ctrl 时展开 */
+.pk-cat-tabs .pk-cat-kbd {
+  display: inline-flex;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  margin-left: 0 !important;
+  padding-left: 0;
+  padding-right: 0;
+  border-width: 0;
+  vertical-align: middle;
+  transition:
+    max-width 180ms cubic-bezier(.2, .7, .3, 1),
+    opacity 140ms ease,
+    margin-left 180ms cubic-bezier(.2, .7, .3, 1),
+    padding 180ms cubic-bezier(.2, .7, .3, 1);
+}
+.win.mod-hint .pk-cat-tabs .pk-cat-kbd {
+  max-width: 4.5rem;
+  opacity: 1;
+  margin-left: 4px !important;
+  padding-left: 5px;
+  padding-right: 5px;
+  border-width: 1px;
+}
+
+/* 行内「关闭」操作：浅红底 */
+.pk-row-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font: var(--t-xs);
+  font-weight: 600;
+  color: var(--danger-fg);
+  background: var(--danger-bg);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  white-space: nowrap;
+}
+
+/* 底栏关闭按钮：浅红描边 */
+.pk-footer-close {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 7px;
+  font: var(--t-xs);
+  font-weight: 600;
+  flex: none;
+  color: var(--danger-fg);
+  background: var(--danger-bg);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  cursor: default;
+  opacity: 0.55;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+.pk-footer-close.pk-footer-close--on {
+  cursor: pointer;
+  opacity: 1;
+}
+.pk-footer-close.pk-footer-close--on:hover {
+  background: color-mix(in srgb, var(--danger-bg) 70%, var(--danger) 30%);
+}
