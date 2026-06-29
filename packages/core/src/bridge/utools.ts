@@ -11,7 +11,7 @@ declare global {
       systemStats(): Promise<SystemStats>;
       killProcess(pid: number, pids: number[]): Promise<KillResult>;
     };
-    utools?: any;
+    utools?: { isDarkColors?: () => boolean; dbStorage?: { getItem(k: string): unknown; setItem(k: string, v: string): void } };
   }
 }
 

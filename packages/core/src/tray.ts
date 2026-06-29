@@ -21,6 +21,15 @@ import { fmtCpu } from "./shared";
 import { icon } from "./icons";
 import { appIcon, kbd, h } from "./atoms";
 import BRAND_ICON_URL from "../assets/app-icon.png";
+import {
+  THEME_PREF_KEY,
+  applyDataTheme,
+  installSystemThemeWatch,
+  resolveEffectiveTheme,
+  resolveThemeState,
+  type ThemePref,
+  type UiTheme,
+} from "./theme";
 
 const TRAY_W = 360;
 const REFRESH_MS = 2000;
@@ -62,7 +71,8 @@ interface TrayState {
   cursor: number;                 // 键盘 cursor 行索引（↑↓ 移动）
   query: string;
   loading: boolean;
-  theme: "dark" | "light";
+  theme: UiTheme;
+  themePref: ThemePref;
   // 偏好（持久化）
   autoClean: boolean;             // 空闲应用自动结束（旧偏好，已由 cleanOn 接替；保留兼容）
   idleMin: number;                // 空闲超过 N 分钟（旧偏好）
@@ -186,7 +196,10 @@ class TrayApp {
       cursor: 0,
       query: "",
       loading: true,
-      theme: this.resolveTheme(),
+      ...(() => {
+        const ts = resolveThemeState(this.bridge.getPref(THEME_PREF_KEY), this.bridge.name === "utools");
+        return { theme: ts.theme, themePref: ts.themePref };
+      })(),
       autoClean: this.bridge.getPref("pk_tray_autoclean") === "1",
       idleMin: this.readNumPref("pk_tray_idlemin", 30, IDLE_MIN_OPTIONS),
       cpuMax: this.readNumPref("pk_tray_cpumax", 1, CPU_MAX_OPTIONS),
@@ -206,7 +219,7 @@ class TrayApp {
       env,
       notify: this.bridge.getPref("pk_tray_notify") !== "0", // 默认开
     };
-    this.applyTheme();
+    this.refreshResolvedTheme();
   }
 
   // 读取数值偏好，校验落在允许集合内，否则回退默认。
@@ -235,17 +248,50 @@ class TrayApp {
     this.bridge.setPref("pk_tray_timer_rules", JSON.stringify(this.s.scheduleRules));
   }
 
-  private resolveTheme(): "dark" | "light" {
-    const saved = this.bridge.getPref("pk_theme");
-    if (saved === "dark" || saved === "light") return saved;
-    const prefersLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
-    return prefersLight ? "light" : "dark";
-  }
-
-  private applyTheme(): void {
-    document.body.setAttribute("data-theme", this.s.theme);
+  private refreshResolvedTheme(): void {
+    this.s.theme = resolveEffectiveTheme(this.s.themePref, this.bridge.name === "utools");
+    applyDataTheme(this.s.theme);
     document.body.classList.toggle("preview", this.previewScene);
     document.body.classList.toggle("popover", !this.previewScene);
+  }
+
+  private installThemeWatch(): void {
+    installSystemThemeWatch(() => {
+      if (this.s.themePref !== "auto") return;
+      this.refreshResolvedTheme();
+    });
+  }
+
+  private setThemePref(pref: ThemePref): void {
+    this.s.themePref = pref;
+    this.bridge.setPref(THEME_PREF_KEY, pref);
+    this.refreshResolvedTheme();
+    this.closeSettings();
+    this.openSettings();
+  }
+
+  private buildAppearanceSeg(): HTMLElement {
+    const seg = h("div", { style: { display: "flex", gap: "3px", padding: "3px", borderRadius: "11px", background: "var(--bg-input)", border: "1px solid var(--border-1)" } });
+    const items: Array<[ThemePref, string, string]> = [
+      ["auto", "跟随电脑", "monitor"],
+      ["light", "浅色", "sun"],
+      ["dark", "深色", "moon"],
+    ];
+    for (const [id, label, iconName] of items) {
+      const on = this.s.themePref === id;
+      seg.appendChild(h("button", {
+        style: {
+          flex: "1", height: "32px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "6px",
+          borderRadius: "8px", border: "none", cursor: "pointer", font: "var(--t-sm)", fontWeight: "700",
+          background: on ? "var(--bg-row-sel)" : "transparent",
+          color: on ? "var(--accent)" : "var(--fg-2)",
+          boxShadow: on ? "inset 0 0 0 1px var(--accent)" : "none",
+        },
+        on: { click: () => this.setThemePref(id) },
+        children: [icon(iconName, 14), document.createTextNode(label)],
+      }));
+    }
+    return seg;
   }
 
   // ============================================================
@@ -499,6 +545,7 @@ class TrayApp {
   start(): void {
     this.mount();
     this.installKeys();
+    this.installThemeWatch();
     this.renderView();
     this.load(true);
     this.armScheduleTimers();
@@ -743,6 +790,8 @@ class TrayApp {
     });
 
     // 运行环境分段控件
+    const appearanceSeg = this.buildAppearanceSeg();
+
     const envSeg = this.buildEnvSeg();
 
     // 通知开关
@@ -758,6 +807,9 @@ class TrayApp {
     });
 
     body.appendChild(h("div", { style: { padding: "4px 0 2px", overflowY: "auto" }, children: [
+      h("div", { className: "t-label", style: { padding: "10px 14px 4px" }, text: "外观" }),
+      h("div", { style: { padding: "0 12px 10px" }, children: [appearanceSeg] }),
+      h("div", { style: { height: "1px", background: "var(--border-1)", margin: "0 12px 6px" } }),
       h("div", { className: "t-label", style: { padding: "10px 14px 4px" }, text: "运行环境" }),
       h("div", { style: { padding: "0 12px 10px" }, children: [envSeg] }),
 
