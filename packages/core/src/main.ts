@@ -14,6 +14,18 @@ import { icon } from "./icons";
 import { appIcon, meter, kbd, h, highlight } from "./atoms";
 // 应用品牌图标（鹅的监控）——vite 处理为可用 URL，用于 uTools 插件标签等品牌位
 import BRAND_ICON_URL from "../assets/app-icon.png";
+import {
+  THEME_PREF_KEY,
+  applyDataTheme,
+  cycleThemePref,
+  installSystemThemeWatch,
+  resolveEffectiveTheme,
+  resolveThemeState,
+  themeButtonTitle,
+  themeIconForPref,
+  type ThemePref,
+  type UiTheme,
+} from "./theme";
 
 type SortKey = "mem" | "cpu" | "procs" | "name";
 type SortDir = "asc" | "desc";
@@ -40,8 +52,8 @@ interface State {
   list: AppRow[]; // 当前分类的原始（未排序未过滤）列表
   stats: SystemStats | null;
   loading: boolean;
-  theme: "dark" | "light"; // 当前主题
-  themeAuto: boolean;      // 是否跟随系统/uTools（未手动切换时为 true）
+  theme: UiTheme;
+  themePref: ThemePref;
 }
 
 // 一行复用的节点引用集合（增量更新时按需改这些子节点）。
@@ -113,7 +125,10 @@ class ProcKillApp {
     // uTools 插件窗口高度由宿主动态决定，height:100% 链可能塌缩导致列表滚不动；
     // 打上标记后 CSS 改用 100vh 固定视口高度，确保滚动区能正确收敛并响应滚轮。
     if (this.bridge.name === "utools") document.body.classList.add("utools");
-    const { theme, auto } = this.resolveInitialTheme();
+    const { theme, themePref } = resolveThemeState(
+      this.bridge.getPref(THEME_PREF_KEY),
+      this.isUtools,
+    );
     this.s = {
       cat: "gui",
       sortKey: "mem",
@@ -129,60 +144,38 @@ class ProcKillApp {
       stats: null,
       loading: true,
       theme,
-      themeAuto: auto,
+      themePref,
     };
-    this.applyTheme();
+    this.refreshResolvedTheme();
   }
 
-  // 初始主题：① 用户存过偏好 → 用它（非 auto）；② uTools 环境 → 跟随 uTools；
-  // ③ 否则跟随系统 prefers-color-scheme。② ③ 视为 auto，会随宿主主题变化。
-  private resolveInitialTheme(): { theme: "dark" | "light"; auto: boolean } {
-    const saved = this.bridge.getPref("pk_theme");
-    if (saved === "dark" || saved === "light") return { theme: saved, auto: false };
-    const u = (window as any).utools;
-    if (this.isUtools && typeof u?.isDarkColors === "function") {
-      return { theme: u.isDarkColors() ? "dark" : "light", auto: true };
-    }
-    const prefersLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
-    return { theme: prefersLight ? "light" : "dark", auto: true };
+  private refreshResolvedTheme(): void {
+    this.s.theme = resolveEffectiveTheme(this.s.themePref, this.isUtools);
+    const extra = this.win ? [this.win] : undefined;
+    applyDataTheme(this.s.theme, extra);
   }
 
-  private applyTheme(): void {
-    document.body.setAttribute("data-theme", this.s.theme);
-    if (this.win) this.win.setAttribute("data-theme", this.s.theme);
-  }
-
-  // 手动切换主题：固定为所选值并持久化，脱离 auto。
   private toggleTheme(): void {
-    this.s.theme = this.s.theme === "dark" ? "light" : "dark";
-    this.s.themeAuto = false;
-    this.bridge.setPref("pk_theme", this.s.theme);
-    this.applyTheme();
+    this.s.themePref = cycleThemePref(this.s.themePref);
+    this.bridge.setPref(THEME_PREF_KEY, this.s.themePref);
+    this.refreshResolvedTheme();
     this.update();
   }
 
-  // 跟随系统主题变化，仅在用户未手动锁定（auto）时生效。
-  // 注意：uTools 主题不在这里注册 onPluginEnter（会覆盖 preload 已注册的带词进入回调）；
-  // 改为在 __prockillEnter 钩子被调用时顺带校准 uTools 主题（见 installUtoolsHooks）。
   private installThemeWatch(): void {
-    if (!window.matchMedia) return;
-    const mq = window.matchMedia("(prefers-color-scheme: light)");
-    const onChange = () => {
-      if (!this.s.themeAuto || this.isUtools) return;
-      this.s.theme = mq.matches ? "light" : "dark";
-      this.applyTheme();
+    installSystemThemeWatch(() => {
+      if (this.s.themePref !== "auto") return;
+      this.refreshResolvedTheme();
       this.update();
-    };
-    mq.addEventListener?.("change", onChange);
+    });
   }
 
-  // auto 模式下，从 uTools 同步一次主题（在每次进入插件时调用）。
-  private syncUtoolsTheme(): void {
-    if (!this.s.themeAuto || !this.isUtools) return;
-    const u = (window as any).utools;
-    if (typeof u?.isDarkColors === "function") {
-      const next = u.isDarkColors() ? "dark" : "light";
-      if (next !== this.s.theme) { this.s.theme = next; this.applyTheme(); }
+  private syncAutoTheme(): void {
+    if (this.s.themePref !== "auto") return;
+    const next = resolveEffectiveTheme("auto", this.isUtools);
+    if (next !== this.s.theme) {
+      this.refreshResolvedTheme();
+      this.update();
     }
   }
 
@@ -446,7 +439,7 @@ class ProcKillApp {
     const w = window as any;
     // 进入插件：先按 uTools 当前主题校准（auto 模式），再带词进入。
     w.__prockillEnter = (keyword: string) => {
-      this.syncUtoolsTheme();
+      this.syncAutoTheme();
       this.setSearch(typeof keyword === "string" ? keyword : "", true);
     };
     // uTools 顶部子输入框实时驱动过滤（text 可能为空 → 清空过滤）。
@@ -816,10 +809,14 @@ class ProcKillApp {
     this.countBadge.textContent = `${v.length} 应用 · ${totalProcs} 进程 · ${catLabel}`;
 
     // 主题按钮：深色态显示太阳（点击切到浅色），浅色态显示月亮（点击切到深色）。仅图标变化时重建。
-    const wantIcon = s.theme === "dark" ? "sun" : "moon";
+    const wantIcon = themeIconForPref(s.themePref);
+    const wantTitle = themeButtonTitle(s.themePref);
     if (this.themeBtn.getAttribute("data-icon") !== wantIcon) {
       this.themeBtn.replaceChildren(icon(wantIcon, 15));
       this.themeBtn.setAttribute("data-icon", wantIcon);
+    }
+    if (this.themeBtn.title !== wantTitle) {
+      this.themeBtn.title = wantTitle;
     }
 
     this.sortBtnLabel.textContent = SORTS.find((x) => x[0] === s.sortKey)![1];

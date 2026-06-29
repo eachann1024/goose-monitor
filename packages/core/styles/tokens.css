@@ -45,18 +45,6 @@
   --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
   --sp-5: 20px; --sp-6: 24px; --sp-8: 32px; --sp-10: 40px;
 
-  /* Stable accent + status hues — 单一陶土红强调色(跨主题语义,主题内覆盖具体值) */
-  --accent:        #d97757;   /* clay/coral — selection, focus, brand */
-  --accent-hover:  #c25f3c;
-  --danger:        #b54a3f;   /* kill / destructive — warm red */
-  --ok:            #187c49;   /* healthy / confirm */
-  --warn:          #eab308;
-
-  /* AI 身份色(紫)— 每个 AI 辅助界面专用,绝不用 coral */
-  --ai:        #7c52e0;
-  --ai-bright: #c8a2f0;
-  --ai-subtle: #f1eaff;
-
   /* Metric category hues (data viz) — 暖化后仍可区分 */
   --metric-cpu: #d9920a;      /* amber  */
   --metric-mem: #7c52e0;      /* AI 紫  */
@@ -66,7 +54,6 @@
 
 /* ----------------------------- DARK (default) -------------------------
    Claude 风格深色:中性暖炭灰(非棕),低彩度,让陶土红与紫色突出。 */
-:root,
 [data-theme="dark"] {
   --bg-app:       #262624;    /* window backdrop / app shell        */
   --bg-sidebar:   #2c2c2a;
