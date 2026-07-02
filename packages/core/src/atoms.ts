@@ -1,6 +1,6 @@
 /* UI 原子：AppIcon / Meter / Kbd —— 内联 style 像素级复刻设计稿 shared.jsx。 */
 import type { AppRow } from "./types";
-import { shade } from "./shared";
+import { fuzzyMatchRanges, shade } from "./shared";
 import { icon } from "./icons";
 
 /** 应用图标：优先真实图标 data URL，否则品牌色字形方块（带顶部高光）。 */
@@ -75,28 +75,24 @@ export function meter(
 
 /** 匹配词高亮：把 text 里命中 query 的子串用品牌色高亮，返回可直接 append 的节点片段。
    复刻设计稿 v7 的 <Hl>：命中段 accent 色 + 700 字重 + bg-row-sel 底 + 3px 圆角。
-   query 为空或不命中时，返回纯文本节点。大小写不敏感。 */
+   query 为空或不命中时，返回纯文本节点。大小写不敏感；支持非连续模糊高亮。 */
 export function highlight(text: string, query: string): DocumentFragment {
   const frag = document.createDocumentFragment();
   const q = (query || "").trim();
   if (!q) { frag.appendChild(document.createTextNode(text)); return frag; }
-  const lower = text.toLowerCase();
-  const ql = q.toLowerCase();
+  const ranges = fuzzyMatchRanges(text, q);
+  if (ranges.length === 0) { frag.appendChild(document.createTextNode(text)); return frag; }
   let from = 0;
-  let i = lower.indexOf(ql, from);
-  if (i < 0) { frag.appendChild(document.createTextNode(text)); return frag; }
-  // 高亮所有命中（不止第一个），列表里更直观
-  while (i >= 0) {
-    if (i > from) frag.appendChild(document.createTextNode(text.slice(from, i)));
+  for (const [start, end] of ranges) {
+    if (start > from) frag.appendChild(document.createTextNode(text.slice(from, start)));
     const mark = document.createElement("span");
     Object.assign(mark.style, {
       color: "var(--accent)", fontWeight: "700",
       background: "var(--bg-row-sel)", borderRadius: "3px", padding: "0 1px",
     } as Partial<CSSStyleDeclaration>);
-    mark.textContent = text.slice(i, i + q.length);
+    mark.textContent = text.slice(start, end);
     frag.appendChild(mark);
-    from = i + q.length;
-    i = lower.indexOf(ql, from);
+    from = end;
   }
   if (from < text.length) frag.appendChild(document.createTextNode(text.slice(from)));
   return frag;

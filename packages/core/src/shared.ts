@@ -40,6 +40,77 @@ export const sumCpu = (list: AppRow[]): number =>
 export const sumMem = (list: AppRow[]): number =>
   list.reduce((a, x) => a + x.mem, 0);
 
+/** 搜索归一化：大小写不敏感，并忽略常见分隔符。 */
+export function normalizeSearchText(text: string): string {
+  return text.toLowerCase().replace(/[\s._\-/:：\\]+/g, "");
+}
+
+/** 非连续模糊匹配：连续子串天然命中；否则按字符顺序命中（如 chr -> Chrome、企微 -> 企业微信）。 */
+export function fuzzyIncludes(text: string, query: string): boolean {
+  const hay = normalizeSearchText(text);
+  const needle = normalizeSearchText(query);
+  if (!needle) return true;
+  if (hay.includes(needle)) return true;
+  let pos = 0;
+  for (let i = 0; i < needle.length; i++) {
+    pos = hay.indexOf(needle[i], pos);
+    if (pos < 0) return false;
+    pos += 1;
+  }
+  return true;
+}
+
+/** 搜索支持空格分词；每个词都要在同一段文本里模糊命中。 */
+export function fuzzyMatch(text: string, query: string): boolean {
+  const parts = query.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return true;
+  return parts.every((part) => fuzzyIncludes(text, part));
+}
+
+/** 返回原始 text 中应高亮的字符位置；优先连续子串，否则退化为非连续字符高亮。 */
+export function fuzzyMatchRanges(text: string, query: string): [number, number][] {
+  const parts = query.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return [];
+  const ranges: [number, number][] = [];
+  const lower = text.toLowerCase();
+
+  for (const part of parts) {
+    const needle = normalizeSearchText(part);
+    if (!needle) continue;
+    let from = 0;
+    let matched = false;
+    const rawNeedle = part.toLowerCase();
+    let index = lower.indexOf(rawNeedle, from);
+    while (index >= 0) {
+      ranges.push([index, index + part.length]);
+      matched = true;
+      from = index + part.length;
+      index = lower.indexOf(rawNeedle, from);
+    }
+    if (matched) continue;
+
+    let pos = 0;
+    const local: [number, number][] = [];
+    for (let i = 0; i < needle.length; i++) {
+      pos = lower.indexOf(needle[i], pos);
+      if (pos < 0) break;
+      local.push([pos, pos + 1]);
+      pos += 1;
+    }
+    if (local.length === needle.length) ranges.push(...local);
+  }
+
+  if (ranges.length <= 1) return ranges;
+  ranges.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged: [number, number][] = [ranges[0]];
+  for (const [start, end] of ranges.slice(1)) {
+    const last = merged[merged.length - 1];
+    if (start <= last[1]) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+  return merged;
+}
+
 /** 颜色加深，用于图标方块渐变。 */
 export function shade(hex: string, amt: number): string {
   const n = parseInt(hex.slice(1), 16);
