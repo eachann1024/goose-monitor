@@ -10,7 +10,7 @@ import "./styles_guard";
 import { detectBridge, type PlatformBridge } from "./bridge";
 import type { AppRow, CategoryId, SystemStats } from "./types";
 import { layoutForCat, metricHdrLabel, type MetricCol } from "./category-layout";
-import { CATEGORIES, fmtMem, fmtCpu, modKeyLabel, isModKey } from "./shared";
+import { CATEGORIES, fmtMem, fmtCpu, modKeyLabel, isModKey, fuzzyMatch } from "./shared";
 import { icon } from "./icons";
 import { appIcon, meter, kbd, enterKey, h, highlight } from "./atoms";
 // 应用品牌图标（鹅的监控）——vite 处理为可用 URL，用于 uTools 插件标签等品牌位
@@ -197,7 +197,7 @@ class ProcKillApp {
   }
 
   private get filtered(): AppRow[] {
-    const q = this.s.query.trim().toLowerCase();
+    const q = this.s.query.trim();
     const base = this.s.list;
     if (!q) return base;
     // 搜索范围：应用名 + 路径 + 每个 Helper 的名称/角色 + PID（搜 "GPU"/PID 都能命中）
@@ -205,7 +205,7 @@ class ProcKillApp {
       const hay =
         a.name + " " + a.path + " " + a.pid + " " +
         a.helpers.map((hp) => hp.name + " " + hp.role + " " + hp.pid).join(" ");
-      return hay.toLowerCase().includes(q);
+      return fuzzyMatch(hay, q);
     });
   }
 

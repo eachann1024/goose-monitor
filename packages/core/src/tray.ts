@@ -17,7 +17,7 @@
 import "./styles_guard";
 import { detectBridge, type PlatformBridge } from "./bridge";
 import type { AppRow } from "./types";
-import { fmtCpu, modKeyLabel } from "./shared";
+import { fmtCpu, fuzzyMatch, modKeyLabel } from "./shared";
 import { icon } from "./icons";
 import { appIcon, kbd, enterKeyMod, h } from "./atoms";
 import BRAND_ICON_URL from "../assets/app-icon.png";
@@ -354,10 +354,10 @@ class TrayApp {
   }
 
   private get visible(): AppRow[] {
-    const q = this.s.query.trim().toLowerCase();
+    const q = this.s.query.trim();
     const base = this.s.list;
     if (!q) return base;
-    return base.filter((a) => (a.name + " " + a.path).toLowerCase().includes(q));
+    return base.filter((a) => fuzzyMatch(a.name + " " + a.path, q));
   }
 
   // 自动清理：优先使用清理线 v2（cleanOn + threshold + exempt）；
