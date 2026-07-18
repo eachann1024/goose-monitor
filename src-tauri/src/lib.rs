@@ -40,7 +40,7 @@ fn list_processes(state: tauri::State<AppState>, category: String) -> Vec<AppRow
     // icon_data_url 内部带进程内缓存（含负缓存）与单飞去重，重复刷新基本零开销。
     for r in rows.iter_mut() {
         if r.icon_url.is_none() {
-            r.icon_url = icon::icon_data_url(&r.path);
+            r.icon_url = icon::icon_data_url(&r.icon_source_path);
         }
     }
     rows

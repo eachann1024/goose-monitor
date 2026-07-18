@@ -10,7 +10,7 @@ import "./styles_guard";
 import { detectBridge, type PlatformBridge } from "./bridge";
 import type { AppRow, CategoryId, SystemStats } from "./types";
 import { layoutForCat, metricHdrLabel, type MetricCol } from "./category-layout";
-import { CATEGORIES, fmtMem, fmtCpu, modKeyLabel, isModKey, fuzzyMatch } from "./shared";
+import { CATEGORIES, fmtMem, fmtCpu, modKeyLabel, isModKey, fuzzyMatch, fuzzyMatchScore } from "./shared";
 import { icon } from "./icons";
 import { appIcon, meter, kbd, enterKey, h, highlight } from "./atoms";
 // 应用品牌图标（鹅的监控）——vite 处理为可用 URL，用于 uTools 插件标签等品牌位
@@ -188,12 +188,32 @@ class ProcKillApp {
   // ---------- 派生数据 ----------
   private sortList(list: AppRow[]): AppRow[] {
     const { sortKey, sortDir } = this.s;
-    const s = [...list].sort((a, b) => {
-      if (sortKey === "name") return a.name.localeCompare(b.name);
-      return ((b as any)[sortKey] || 0) - ((a as any)[sortKey] || 0);
+    return [...list].sort((a, b) => {
+      const q = this.s.query.trim();
+      if (q) {
+        const bySearch = this.searchScore(a, q) - this.searchScore(b, q);
+        if (bySearch !== 0) return bySearch;
+      }
+      if (sortKey === "name") {
+        const byName = a.name.localeCompare(b.name);
+        return sortDir === "asc" ? byName : -byName;
+      }
+      const byMetricDesc = ((b as any)[sortKey] || 0) - ((a as any)[sortKey] || 0);
+      return sortDir === "desc" ? byMetricDesc : -byMetricDesc;
     });
-    if (sortKey === "name") return sortDir === "asc" ? s : s.reverse();
-    return sortDir === "asc" ? s.reverse() : s;
+  }
+
+  private searchScore(app: AppRow, query: string): number {
+    const helperScore = app.helpers.reduce((best, hp) => Math.min(
+      best,
+      80 + fuzzyMatchScore(`${hp.name} ${hp.role} ${hp.pid}`, query),
+    ), Number.POSITIVE_INFINITY);
+    return Math.min(
+      fuzzyMatchScore(app.name, query),
+      20 + fuzzyMatchScore(String(app.pid), query),
+      40 + fuzzyMatchScore(app.path, query),
+      helperScore,
+    );
   }
 
   private get filtered(): AppRow[] {

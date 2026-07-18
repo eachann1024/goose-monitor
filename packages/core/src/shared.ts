@@ -45,26 +45,55 @@ export function normalizeSearchText(text: string): string {
   return text.toLowerCase().replace(/[\s._\-/:：\\]+/g, "");
 }
 
-/** 非连续模糊匹配：连续子串天然命中；否则按字符顺序命中（如 chr -> Chrome、企微 -> 企业微信）。 */
-export function fuzzyIncludes(text: string, query: string): boolean {
+function isAsciiWordQuery(text: string): boolean {
+  return /^[a-z0-9]+$/.test(normalizeSearchText(text));
+}
+
+function fuzzyPartScore(text: string, query: string): number {
   const hay = normalizeSearchText(text);
   const needle = normalizeSearchText(query);
-  if (!needle) return true;
-  if (hay.includes(needle)) return true;
+  if (!needle) return 0;
+  if (!hay) return Number.POSITIVE_INFINITY;
+  if (hay === needle) return 0;
+  const index = hay.indexOf(needle);
+  if (index === 0) return 4 + (hay.length - needle.length) * 0.01;
+  if (index > 0) return 20 + index + (hay.length - needle.length) * 0.01;
+  if (isAsciiWordQuery(query)) return Number.POSITIVE_INFINITY;
+
   let pos = 0;
+  let first = -1;
+  let last = -1;
   for (let i = 0; i < needle.length; i++) {
     pos = hay.indexOf(needle[i], pos);
-    if (pos < 0) return false;
+    if (pos < 0) return Number.POSITIVE_INFINITY;
+    if (first < 0) first = pos;
+    last = pos;
     pos += 1;
   }
-  return true;
+  return 80 + first + (last - first);
+}
+
+/** 模糊匹配：拉丁字母/数字必须连续命中；中文等非拉丁查询保留按字符顺序命中（如 企微 -> 企业微信）。 */
+export function fuzzyIncludes(text: string, query: string): boolean {
+  return Number.isFinite(fuzzyPartScore(text, query));
+}
+
+/** 搜索相关性分数，越小越匹配；不命中返回 Infinity。 */
+export function fuzzyMatchScore(text: string, query: string): number {
+  const parts = query.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return 0;
+  let score = 0;
+  for (const part of parts) {
+    const partScore = fuzzyPartScore(text, part);
+    if (!Number.isFinite(partScore)) return Number.POSITIVE_INFINITY;
+    score += partScore;
+  }
+  return score;
 }
 
 /** 搜索支持空格分词；每个词都要在同一段文本里模糊命中。 */
 export function fuzzyMatch(text: string, query: string): boolean {
-  const parts = query.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return true;
-  return parts.every((part) => fuzzyIncludes(text, part));
+  return Number.isFinite(fuzzyMatchScore(text, query));
 }
 
 /** 返回原始 text 中应高亮的字符位置；优先连续子串，否则退化为非连续字符高亮。 */
@@ -87,7 +116,7 @@ export function fuzzyMatchRanges(text: string, query: string): [number, number][
       from = index + part.length;
       index = lower.indexOf(rawNeedle, from);
     }
-    if (matched) continue;
+    if (matched || isAsciiWordQuery(part)) continue;
 
     let pos = 0;
     const local: [number, number][] = [];
