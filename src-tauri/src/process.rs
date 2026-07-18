@@ -76,6 +76,13 @@ pub struct AppRow {
     pub mem: f64, // MB
     pub pid: u32,
     pub path: String,
+    /// 用于提取应用图标的真实可执行文件路径。
+    ///
+    /// Windows 应用会按可执行文件所在目录分组，`path` 因而可能是目录；图标提取器则必须
+    /// 收到 `.exe`。此字段只供 Rust 后端使用，不暴露给前端。
+    #[serde(skip)]
+    #[allow(dead_code)] // examples 只验证序列化契约，不执行 lib.rs 中的图标提取流程
+    pub(crate) icon_source_path: String,
     pub helpers: Vec<Helper>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sys: Option<bool>,
@@ -368,6 +375,10 @@ fn merge(raw: &[RawProc], idle: &IdleTracker) -> Vec<AppRow> {
         } else {
             main.exe.clone()
         };
+        // 分组后的展示路径可能不是可执行文件：macOS 是 .app，Windows 是 exe 所在目录。
+        // 图标提取必须始终使用组内代表进程的真实可执行路径；macOS 提取器也能从该路径
+        // 反向找到 .app bundle，Linux 本来就需要可执行路径。
+        let icon_source_path = main.exe.clone();
 
         rows.push(AppRow {
             id: format!("g{}", main.pid),
@@ -379,6 +390,7 @@ fn merge(raw: &[RawProc], idle: &IdleTracker) -> Vec<AppRow> {
             mem: total_mem,
             pid: main.pid,
             path,
+            icon_source_path,
             helpers,
             sys: if g.is_sys { Some(true) } else { None },
             icon_url: None,
@@ -526,4 +538,35 @@ pub use sysinfo::MINIMUM_CPU_UPDATE_INTERVAL;
 #[allow(dead_code)]
 pub fn to_pid(pid: u32) -> Pid {
     Pid::from_u32(pid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merged_app_keeps_executable_path_for_icon_extraction() {
+        let executable = "/Applications/Demo.app/Contents/MacOS/Demo";
+        let raw = vec![RawProc {
+            pid: 42,
+            ppid: 1,
+            name: "Demo".into(),
+            exe: executable.into(),
+            cpu: 0.0,
+            mem_mb: 64.0,
+        }];
+
+        let rows = merge(&raw, &IdleTracker::new());
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, "/Applications/Demo.app");
+        assert_eq!(rows[0].icon_source_path, executable);
+        assert!(
+            serde_json::to_value(&rows[0])
+                .expect("AppRow should serialize")
+                .get("icon_source_path")
+                .is_none(),
+            "backend-only icon source path must not leak into the frontend payload"
+        );
+    }
 }

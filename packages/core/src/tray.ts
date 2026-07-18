@@ -17,7 +17,7 @@
 import "./styles_guard";
 import { detectBridge, type PlatformBridge } from "./bridge";
 import type { AppRow } from "./types";
-import { fmtCpu, fuzzyMatch, modKeyLabel } from "./shared";
+import { fmtCpu, fuzzyMatch, fuzzyMatchScore, modKeyLabel } from "./shared";
 import { icon } from "./icons";
 import { appIcon, kbd, enterKeyMod, h } from "./atoms";
 import BRAND_ICON_URL from "../assets/app-icon.png";
@@ -357,7 +357,16 @@ class TrayApp {
     const q = this.s.query.trim();
     const base = this.s.list;
     if (!q) return base;
-    return base.filter((a) => fuzzyMatch(a.name + " " + a.path, q));
+    return base
+      .filter((a) => fuzzyMatch(a.name + " " + a.path, q))
+      .sort((a, b) => this.searchScore(a, q) - this.searchScore(b, q));
+  }
+
+  private searchScore(app: AppRow, query: string): number {
+    return Math.min(
+      fuzzyMatchScore(app.name, query),
+      40 + fuzzyMatchScore(app.path, query),
+    );
   }
 
   // 自动清理：优先使用清理线 v2（cleanOn + threshold + exempt）；
