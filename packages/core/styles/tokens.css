@@ -16,7 +16,8 @@
 
 :root {
   /* Type families — Claude 风格:衬线显示体 + 原生系统无衬线 */
-  --font-serif: "Newsreader", "Noto Serif SC", Georgia, "Songti SC", serif;
+  --font-serif: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+    "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
     "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -70,7 +71,7 @@
 
   --fg-1: #faf9f5;
   --fg-2: #b7b5ad;
-  --fg-3: #75746d;
+  --fg-3: #aaa79f;
   --fg-on-accent: #ffffff;
 
   --accent:        #e0875f;   /* coral brighter for dark            */
@@ -84,6 +85,8 @@
   --danger:    #d15c56;
   --danger-bg: rgba(209,92,86,0.16);
   --danger-fg: #ef9a8f;
+  --danger-border: #75413e;
+  --danger-hover: #55302d;
   --ok:        #22c55e;
   --ok-bg:     rgba(34,197,94,0.14);
 
@@ -110,7 +113,7 @@
 
   --fg-1: #1f1e1d;            /* Claude warm ink                    */
   --fg-2: #6c6b64;
-  --fg-3: #a4a299;
+  --fg-3: #6f6d66;
   --fg-on-accent: #ffffff;
 
   --accent:        #d97757;
@@ -124,6 +127,8 @@
   --danger:    #b54a3f;
   --danger-bg: rgba(181,74,63,0.10);
   --danger-fg: #b54a3f;
+  --danger-border: #d7aaa5;
+  --danger-hover: #efd7d4;
   --ok:        #187c49;
   --ok-bg:     rgba(24,124,73,0.12);
 

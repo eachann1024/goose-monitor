@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   # 前置清理：删掉同名 tag 的旧 draft Release，让三平台从干净状态全新上传，
   # 避免重跑时 tauri-action 撞 ReleaseAsset already_exists（它不覆盖同名 asset）。
@@ -24,8 +28,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if ! gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          if [ "$(gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)" != "true" ]; then
+            echo "::error::同标签已有正式 Release，拒绝删除或覆盖"
+            exit 1
+          fi
           gh release delete "${{ github.ref_name }}" \
-            --repo "${{ github.repository }}" --yes --cleanup-tag=false || true
+            --repo "${{ github.repository }}" --yes --cleanup-tag=false
 
   build:
     needs: cleanup
@@ -47,7 +58,7 @@ jobs:
             rust-targets: ""
           # Linux：Ubuntu 22.04（webkit2gtk-4.1）。
           - platform: ubuntu-22.04
-            args: ""
+            args: "--bundles appimage,deb"
             rust-targets: ""
 
     runs-on: ${{ matrix.platform }}
@@ -83,7 +94,15 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
-      # tauri-action 会跑 beforeBuildCommand（bun run build）→ tauri build → 收集产物。
+      - name: Verify version and tests
+        env:
+          EXPECTED_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          bun run check:versions
+          bun test
+          cargo test --manifest-path src-tauri/Cargo.toml --all-targets --locked
+
+      # tauri-action 会跑 beforeBuildCommand（bun run build:frontend）→ tauri build → 收集产物。
       # 有 tag 时自动建 Release 并上传安装包；手动触发时仅构建。
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
@@ -95,3 +114,27 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  utools:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Build and verify uTools plugin
+        env:
+          EXPECTED_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          bun run check
+          cd utools-dist
+          zip -r ../goose-monitor-utools.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goose-monitor-utools
+          path: goose-monitor-utools.zip
+      - name: Upload uTools package to draft release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" goose-monitor-utools.zip --clobber --repo "${{ github.repository }}"
