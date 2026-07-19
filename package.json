@@ -9,7 +9,7 @@
     "build": "bun run build:utools",
     "build:frontend": "node node_modules/vite/bin/vite.js build",
     "test": "bun test",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
     "check:versions": "node scripts/check-versions.mjs",
     "check": "bun run check:versions && bun run typecheck && bun test && bun run build:utools",
     "mac": "node scripts/guard-platform.mjs darwin && tauri build",
@@ -28,6 +28,7 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.2",
     "@types/bun": "^1.3.14",
+    "esbuild": "^0.28.1",
     "typescript": "^7.0.2",
     "vite": "^8.0.16"
   },
