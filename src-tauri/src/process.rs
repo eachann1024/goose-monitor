@@ -3,7 +3,7 @@
 //! 把 Electron Helper / 子进程归并到代表进程下，汇总 CPU + 内存。
 
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
@@ -13,16 +13,18 @@ const IDLE_CPU_THRESHOLD: f32 = 1.0;
 
 /// 进程空闲时长追踪器：记录每个 pid 自上次「活跃（CPU>=阈值）」以来的起点。
 /// 由后台刷新线程每秒调一次 `update`；`idle_minutes` 查询某 pid 已空闲多久。
-/// pid 复用风险可接受：复用后 CPU 一旦活跃即清零，最坏只是少清理一轮。
+/// 同时记录启动时间，PID 被复用时立即重置空闲计时，避免新进程继承旧进程时长。
 #[derive(Default)]
 pub struct IdleTracker {
-    /// pid -> 进入低占用的起始时刻（仍处于低占用才有值）。
-    since: HashMap<u32, Instant>,
+    /// pid -> (进程启动时间, 进入低占用的起始时刻)。启动时间用于识别 PID 复用。
+    since: HashMap<u32, (u64, Instant)>,
 }
 
 impl IdleTracker {
     pub fn new() -> Self {
-        Self { since: HashMap::new() }
+        Self {
+            since: HashMap::new(),
+        }
     }
 
     /// 用最新一轮进程快照推进空闲计时：
@@ -36,7 +38,17 @@ impl IdleTracker {
             let id = pid.as_u32();
             alive.insert(id);
             if p.cpu_usage() < IDLE_CPU_THRESHOLD {
-                self.since.entry(id).or_insert(now);
+                let started_at = p.start_time();
+                match self.since.get_mut(&id) {
+                    Some((known_start, idle_since)) if *known_start != started_at => {
+                        *known_start = started_at;
+                        *idle_since = now;
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.since.insert(id, (started_at, now));
+                    }
+                }
             } else {
                 self.since.remove(&id);
             }
@@ -48,7 +60,7 @@ impl IdleTracker {
     /// 某 pid 已连续空闲的分钟数（无记录即 0）。
     pub fn idle_minutes(&self, pid: u32) -> f64 {
         match self.since.get(&pid) {
-            Some(t) => t.elapsed().as_secs_f64() / 60.0,
+            Some((_, t)) => t.elapsed().as_secs_f64() / 60.0,
             None => 0.0,
         }
     }
@@ -68,6 +80,11 @@ pub struct Helper {
 #[derive(Serialize, Clone)]
 pub struct AppRow {
     pub id: String,
+    /// 跨刷新/重启稳定的应用身份。持久化豁免和计划任务使用它，不使用瞬时 PID。
+    pub identity: String,
+    /// 当前进程组快照标识。终止操作会重新比对，避免 PID 复用或成员变化时误伤新进程。
+    #[serde(rename = "snapshotToken")]
+    pub snapshot_token: String,
     pub name: String,
     pub monogram: String,
     pub color: String,
@@ -96,6 +113,9 @@ pub struct AppRow {
     /// 取组内成员中最小者（任一成员活跃即视为整组未空闲），保守不误伤。
     #[serde(rename = "idleMinutes")]
     pub idle_minutes: f64,
+    /// 仅由后端对保守、可确认的 GUI 应用置 true。自动清理必须额外检查此字段。
+    #[serde(rename = "autoCleanEligible")]
+    pub auto_clean_eligible: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -111,8 +131,8 @@ pub struct SystemStats {
 /// 一个原始进程的精简视图。
 struct RawProc {
     pid: u32,
-    #[allow(dead_code)] // 预留：父子关系精细合并
     ppid: u32,
+    start_time: u64,
     name: String,
     exe: String,
     cpu: f32,
@@ -138,7 +158,10 @@ fn monogram_for(name: &str) -> String {
         .trim_end_matches(".app")
         .trim_end_matches(".exe")
         .trim();
-    let words: Vec<&str> = cleaned.split([' ', '-', '_']).filter(|w| !w.is_empty()).collect();
+    let words: Vec<&str> = cleaned
+        .split([' ', '-', '_'])
+        .filter(|w| !w.is_empty())
+        .collect();
     if words.len() >= 2 {
         let a = words[0].chars().next().unwrap_or('?');
         let b = words[1].chars().next().unwrap_or('?');
@@ -200,22 +223,25 @@ fn app_bundle(exe: &str) -> Option<(String, String)> {
             .to_string();
         return Some((exe.to_string(), name));
     }
-    // Windows：Electron 应用（Slack/VSCode/Discord 等）的主程序与 Helper 在同一目录，
-    // 按可执行文件所在目录分组，使 Helper 合并到主应用下。
-    if cfg!(target_os = "windows") && exe.to_lowercase().ends_with(".exe") {
-        let p = Path::new(exe);
-        if let (Some(dir), Some(stem)) = (
-            p.parent().and_then(|d| d.to_str()),
-            p.file_stem().and_then(|s| s.to_str()),
-        ) {
-            // 仅对用户安装目录下的应用做目录合并，避免把 System32 一堆 exe 全归一组
-            let low = exe.to_lowercase();
-            if low.contains("\\users\\") || low.contains("\\appdata\\") || low.contains("\\program files") {
-                return Some((dir.to_string(), stem.to_string()));
-            }
-        }
-    }
     None
+}
+
+/// 稳定、非随机的短标识。不能使用 DefaultHasher（每次进程启动会随机播种）。
+fn stable_id(input: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("g{hash:016x}")
+}
+
+fn auto_clean_eligible(path: &str, is_sys: bool) -> bool {
+    if is_sys || !cfg!(target_os = "macos") || !path.ends_with(".app") {
+        return false;
+    }
+    path.starts_with("/Applications/")
+        || (path.starts_with("/Users/") && path.contains("/Applications/"))
 }
 
 /// 判断是否界面应用（在 .app bundle 内 / Program Files / Electron app 目录 / Linux 应用目录）。
@@ -225,9 +251,8 @@ fn is_gui(exe: &str) -> bool {
         // AccessibilityVisualsAgent），但它们装在 /System/ 或 /Library/ 下，并非用户应用。
         // 仅凭 .app 会把它们误判为界面应用 → 进入 gui 列表 → 被自动清理误杀。
         // 故系统/库目录下的 .app 一律不算用户 GUI 应用，交回 is_system_path 标记为系统进程。
-        let in_system_dir = exe.starts_with("/System/")
-            || exe.starts_with("/Library/")
-            || exe.starts_with("/usr/");
+        let in_system_dir =
+            exe.starts_with("/System/") || exe.starts_with("/Library/") || exe.starts_with("/usr/");
         return !in_system_dir;
     }
     if cfg!(target_os = "windows") {
@@ -241,7 +266,11 @@ fn is_gui(exe: &str) -> bool {
         // Linux 界面应用常见安装位置。排除工具链/CLI 常驻的 .../bin/ 目录，
         // 避免把 /opt/homebrew/bin/node、/opt/rh/.../bin/ruby 误判为界面应用。
         let is_toolchain = exe.contains("/bin/")
-            && (exe.contains("homebrew") || exe.contains("/rh/") || exe.contains("/node") || exe.contains("python") || exe.contains("ruby"));
+            && (exe.contains("homebrew")
+                || exe.contains("/rh/")
+                || exe.contains("/node")
+                || exe.contains("python")
+                || exe.contains("ruby"));
         if is_toolchain {
             return false;
         }
@@ -284,6 +313,7 @@ fn collect_raw(sys: &System) -> Vec<RawProc> {
         out.push(RawProc {
             pid: pid.as_u32(),
             ppid: p.parent().map(|x| x.as_u32()).unwrap_or(0),
+            start_time: p.start_time(),
             name,
             exe,
             cpu: p.cpu_usage(),
@@ -296,10 +326,11 @@ fn collect_raw(sys: &System) -> Vec<RawProc> {
 /// 把原始进程合并为按"应用"分组的 AppRow 列表。
 /// `idle` 用于给每组算空闲时长（组内成员最小者，保守）。
 fn merge(raw: &[RawProc], idle: &IdleTracker) -> Vec<AppRow> {
-    // 分组键：界面进程按 .app bundle；否则按 exe 路径（同一可执行的多实例合并）；
-    // 都没有则按进程名。
+    // 分组键：界面进程按 .app bundle；否则按“同一 exe 的一棵进程树”；
+    // 没有可执行路径时每个 PID 独立成组，避免无关实例被一起结束。
     struct Group {
         key: String,
+        identity: String,
         display: String,
         bundle_path: String,
         members: Vec<usize>, // raw 下标
@@ -307,20 +338,52 @@ fn merge(raw: &[RawProc], idle: &IdleTracker) -> Vec<AppRow> {
         is_sys: bool,
     }
     let mut groups: HashMap<String, Group> = HashMap::new();
-    let pid_to_idx: HashMap<u32, usize> =
-        raw.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
+    let pid_to_idx: HashMap<u32, usize> = raw.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
 
     for (i, p) in raw.iter().enumerate() {
-        let (key, display, bundle, gui) = if let Some((bundle, name)) = app_bundle(&p.exe) {
-            (format!("app:{}", bundle), name, bundle, true)
+        let (key, identity, display, bundle, gui) = if let Some((bundle, name)) = app_bundle(&p.exe)
+        {
+            let identity = format!("app:{bundle}");
+            (identity.clone(), identity, name, bundle, true)
         } else if !p.exe.is_empty() {
-            (format!("exe:{}", p.exe), p.name.clone(), p.exe.clone(), is_gui(&p.exe))
+            // 非 bundle 程序按“同一可执行文件的一棵进程树”分组。这样既能归并
+            // Electron/浏览器的同 exe 子进程，也不会把两个独立 node/python 实例一起结束。
+            let mut root_idx = i;
+            let mut parent_pid = p.ppid;
+            let mut seen = HashSet::new();
+            while parent_pid > 1 && seen.insert(parent_pid) {
+                let Some(&parent_idx) = pid_to_idx.get(&parent_pid) else {
+                    break;
+                };
+                let parent = &raw[parent_idx];
+                if parent.exe != p.exe {
+                    break;
+                }
+                root_idx = parent_idx;
+                parent_pid = parent.ppid;
+            }
+            let identity = format!("exe:{}", p.exe);
+            (
+                format!("{identity}#{}", raw[root_idx].pid),
+                identity,
+                p.name.clone(),
+                p.exe.clone(),
+                is_gui(&p.exe),
+            )
         } else {
-            (format!("name:{}", p.name), p.name.clone(), String::new(), false)
+            let identity = format!("name:{}", p.name);
+            (
+                format!("{identity}#{}", p.pid),
+                identity,
+                p.name.clone(),
+                String::new(),
+                false,
+            )
         };
         let is_sys = is_system_path(&p.exe, &p.name) && !gui;
         let g = groups.entry(key.clone()).or_insert_with(|| Group {
             key,
+            identity,
             display,
             bundle_path: bundle,
             members: Vec::new(),
@@ -330,8 +393,6 @@ fn merge(raw: &[RawProc], idle: &IdleTracker) -> Vec<AppRow> {
         g.members.push(i);
     }
 
-    let _ = pid_to_idx; // 预留：未来可用父子关系做更精细合并
-
     let mut rows: Vec<AppRow> = Vec::new();
     for (_, g) in groups {
         if g.members.is_empty() {
@@ -339,7 +400,11 @@ fn merge(raw: &[RawProc], idle: &IdleTracker) -> Vec<AppRow> {
         }
         // 选代表进程：内存最大者作为"主进程"（通常即主进程；对 Chrome 这类也合理）
         let mut members: Vec<&RawProc> = g.members.iter().map(|&i| &raw[i]).collect();
-        members.sort_by(|a, b| b.mem_mb.partial_cmp(&a.mem_mb).unwrap_or(std::cmp::Ordering::Equal));
+        members.sort_by(|a, b| {
+            b.mem_mb
+                .partial_cmp(&a.mem_mb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let main = members[0];
 
         let total_cpu: f32 = members.iter().map(|m| m.cpu).sum();
@@ -351,7 +416,11 @@ fn merge(raw: &[RawProc], idle: &IdleTracker) -> Vec<AppRow> {
             .iter()
             .map(|m| idle.idle_minutes(m.pid))
             .fold(f64::INFINITY, f64::min);
-        let idle_minutes = if idle_minutes.is_finite() { idle_minutes } else { 0.0 };
+        let idle_minutes = if idle_minutes.is_finite() {
+            idle_minutes
+        } else {
+            0.0
+        };
 
         // helpers 仅在多进程时构建
         let helpers: Vec<Helper> = if members.len() > 1 {
@@ -380,8 +449,16 @@ fn merge(raw: &[RawProc], idle: &IdleTracker) -> Vec<AppRow> {
         // 反向找到 .app bundle，Linux 本来就需要可执行路径。
         let icon_source_path = main.exe.clone();
 
+        let mut snapshot_members: Vec<String> = members
+            .iter()
+            .map(|member| format!("{}:{}", member.pid, member.start_time))
+            .collect();
+        snapshot_members.sort_unstable();
+
         rows.push(AppRow {
-            id: format!("g{}", main.pid),
+            id: stable_id(&g.key),
+            identity: g.identity.clone(),
+            snapshot_token: stable_id(&snapshot_members.join(",")),
             name: g.display.clone(),
             monogram: monogram_for(&g.display),
             color: color_for(&g.display),
@@ -397,6 +474,7 @@ fn merge(raw: &[RawProc], idle: &IdleTracker) -> Vec<AppRow> {
             all_pids,
             port: None,
             idle_minutes,
+            auto_clean_eligible: auto_clean_eligible(&g.bundle_path, g.is_sys),
         });
         let _ = g.is_gui;
         let _ = g.key;
@@ -414,11 +492,13 @@ fn listen_ports() -> HashMap<u32, String> {
             for line in text.lines() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 // 格式: TCP  0.0.0.0:5173  0.0.0.0:0  LISTENING  1234
-                if parts.len() >= 5 && parts[0] == "TCP" && parts[3].eq_ignore_ascii_case("LISTENING") {
-                    if let (Some(port), Ok(pid)) = (
-                        parts[1].rsplit(':').next(),
-                        parts[4].parse::<u32>(),
-                    ) {
+                if parts.len() >= 5
+                    && parts[0] == "TCP"
+                    && parts[3].eq_ignore_ascii_case("LISTENING")
+                {
+                    if let (Some(port), Ok(pid)) =
+                        (parts[1].rsplit(':').next(), parts[4].parse::<u32>())
+                    {
                         map.entry(pid).or_insert_with(|| port.to_string());
                     }
                 }
@@ -436,7 +516,8 @@ fn listen_ports() -> HashMap<u32, String> {
                 if let Ok(pid) = parts[1].parse::<u32>() {
                     if let Some(addr) = parts.iter().find(|s| s.contains(':')) {
                         if let Some(port) = addr.rsplit(':').next() {
-                            let port: String = port.chars().take_while(|c| c.is_ascii_digit()).collect();
+                            let port: String =
+                                port.chars().take_while(|c| c.is_ascii_digit()).collect();
                             if !port.is_empty() {
                                 map.entry(pid).or_insert(port);
                             }
@@ -460,25 +541,25 @@ pub fn list_by_category(sys: &System, idle: &IdleTracker, category: &str) -> Vec
             // 注意不要再额外 `|| path.contains(".app")`——系统守护进程也住在 .app 内，
             // is_gui 已据系统目录把它们排除，绕过去会把它们漏回 gui 列表。
             rows.retain(|r| is_gui(&r.path) && !r.sys.unwrap_or(false));
-            // 平台拿不到可靠路径时（如部分 Linux），退化为非系统进程
-            if rows.is_empty() {
-                rows = merge(&raw, idle);
-                rows.retain(|r| !r.sys.unwrap_or(false));
-            }
-            rows.sort_by(|a, b| b.mem.partial_cmp(&a.mem).unwrap_or(std::cmp::Ordering::Equal));
+            rows.sort_by(|a, b| {
+                b.mem
+                    .partial_cmp(&a.mem)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
         "bg" => {
             rows.retain(|r| r.sys.unwrap_or(false));
-            rows.sort_by(|a, b| b.mem.partial_cmp(&a.mem).unwrap_or(std::cmp::Ordering::Equal));
+            rows.sort_by(|a, b| {
+                b.mem
+                    .partial_cmp(&a.mem)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
         "net" => {
             // 关联监听端口，只保留有端口的进程组
             let ports = listen_ports();
             rows.retain_mut(|r| {
-                let hit = r
-                    .all_pids
-                    .iter()
-                    .find_map(|p| ports.get(p).cloned());
+                let hit = r.all_pids.iter().find_map(|p| ports.get(p).cloned());
                 if let Some(port) = hit {
                     r.port = Some(port);
                     true
@@ -492,10 +573,18 @@ pub fn list_by_category(sys: &System, idle: &IdleTracker, category: &str) -> Vec
                 pa.cmp(&pb)
             });
         }
-        "cpu" => rows.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal)),
+        "cpu" => rows.sort_by(|a, b| {
+            b.cpu
+                .partial_cmp(&a.cpu)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
         _ => {
             // all / mem 默认按内存降序
-            rows.sort_by(|a, b| b.mem.partial_cmp(&a.mem).unwrap_or(std::cmp::Ordering::Equal));
+            rows.sort_by(|a, b| {
+                b.mem
+                    .partial_cmp(&a.mem)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
     }
 
@@ -517,7 +606,12 @@ pub fn system_stats(sys: &System) -> SystemStats {
 pub fn new_system() -> System {
     let mut sys = System::new_with_specifics(
         RefreshKind::nothing()
-            .with_processes(ProcessRefreshKind::nothing().with_cpu().with_memory().with_exe(sysinfo::UpdateKind::Always))
+            .with_processes(
+                ProcessRefreshKind::nothing()
+                    .with_cpu()
+                    .with_memory()
+                    .with_exe(sysinfo::UpdateKind::Always),
+            )
             .with_cpu(sysinfo::CpuRefreshKind::nothing().with_cpu_usage())
             .with_memory(sysinfo::MemoryRefreshKind::everything()),
     );
@@ -530,6 +624,22 @@ pub fn refresh(sys: &mut System) {
     sys.refresh_processes(ProcessesToUpdate::All, true);
     sys.refresh_cpu_usage();
     sys.refresh_memory();
+}
+
+/// 当前进程及其所有祖先 PID。结束其中任意一个都可能连带关闭本应用，必须保护。
+pub fn current_process_ancestors(sys: &System) -> HashSet<u32> {
+    let mut protected = HashSet::new();
+    let mut cursor = std::process::id();
+    while cursor > 0 && protected.insert(cursor) {
+        let Some(process) = sys.process(Pid::from_u32(cursor)) else {
+            break;
+        };
+        let Some(parent) = process.parent() else {
+            break;
+        };
+        cursor = parent.as_u32();
+    }
+    protected
 }
 
 pub use sysinfo::MINIMUM_CPU_UPDATE_INTERVAL;
@@ -550,6 +660,7 @@ mod tests {
         let raw = vec![RawProc {
             pid: 42,
             ppid: 1,
+            start_time: 100,
             name: "Demo".into(),
             exe: executable.into(),
             cpu: 0.0,
@@ -559,6 +670,7 @@ mod tests {
         let rows = merge(&raw, &IdleTracker::new());
 
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].identity, "app:/Applications/Demo.app");
         assert_eq!(rows[0].path, "/Applications/Demo.app");
         assert_eq!(rows[0].icon_source_path, executable);
         assert!(
@@ -568,5 +680,115 @@ mod tests {
                 .is_none(),
             "backend-only icon source path must not leak into the frontend payload"
         );
+    }
+
+    #[test]
+    fn bundle_id_does_not_change_when_representative_process_changes() {
+        let mut raw = vec![
+            RawProc {
+                pid: 42,
+                ppid: 1,
+                start_time: 100,
+                name: "Demo".into(),
+                exe: "/Applications/Demo.app/Contents/MacOS/Demo".into(),
+                cpu: 1.0,
+                mem_mb: 80.0,
+            },
+            RawProc {
+                pid: 43,
+                ppid: 42,
+                start_time: 101,
+                name: "Demo Helper".into(),
+                exe: "/Applications/Demo.app/Contents/Frameworks/Demo Helper".into(),
+                cpu: 2.0,
+                mem_mb: 40.0,
+            },
+        ];
+        let first = merge(&raw, &IdleTracker::new());
+        raw[0].mem_mb = 20.0;
+        raw[1].mem_mb = 120.0;
+        let second = merge(&raw, &IdleTracker::new());
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].id, second[0].id);
+        assert_eq!(first[0].identity, second[0].identity);
+    }
+
+    #[test]
+    fn snapshot_token_changes_when_pid_is_reused() {
+        let mut raw = vec![RawProc {
+            pid: 42,
+            ppid: 1,
+            start_time: 100,
+            name: "Demo".into(),
+            exe: "/Applications/Demo.app/Contents/MacOS/Demo".into(),
+            cpu: 1.0,
+            mem_mb: 80.0,
+        }];
+        let first = merge(&raw, &IdleTracker::new());
+        raw[0].start_time = 200;
+        let second = merge(&raw, &IdleTracker::new());
+
+        assert_eq!(first[0].id, second[0].id);
+        assert_ne!(first[0].snapshot_token, second[0].snapshot_token);
+    }
+
+    #[test]
+    fn independent_instances_of_same_executable_stay_separate() {
+        let raw = vec![
+            RawProc {
+                pid: 100,
+                ppid: 1,
+                start_time: 100,
+                name: "node".into(),
+                exe: "/usr/local/bin/node".into(),
+                cpu: 1.0,
+                mem_mb: 50.0,
+            },
+            RawProc {
+                pid: 200,
+                ppid: 1,
+                start_time: 200,
+                name: "node".into(),
+                exe: "/usr/local/bin/node".into(),
+                cpu: 1.0,
+                mem_mb: 50.0,
+            },
+        ];
+
+        let rows = merge(&raw, &IdleTracker::new());
+
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].id, rows[1].id);
+    }
+
+    #[test]
+    fn child_processes_with_same_executable_are_grouped() {
+        let raw = vec![
+            RawProc {
+                pid: 100,
+                ppid: 1,
+                start_time: 100,
+                name: "browser".into(),
+                exe: "/opt/browser/browser".into(),
+                cpu: 1.0,
+                mem_mb: 50.0,
+            },
+            RawProc {
+                pid: 101,
+                ppid: 100,
+                start_time: 101,
+                name: "browser".into(),
+                exe: "/opt/browser/browser".into(),
+                cpu: 2.0,
+                mem_mb: 60.0,
+            },
+        ];
+
+        let rows = merge(&raw, &IdleTracker::new());
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].all_pids.len(), 2);
     }
 }

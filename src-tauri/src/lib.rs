@@ -57,8 +57,37 @@ fn system_stats(state: tauri::State<AppState>) -> SystemStats {
 // 不再提醒等偏好。故后端不再单独暴露 auto_clean_scan 命令（曾有，已删，避免两套并存的清理路径）。
 
 #[tauri::command]
-fn kill_process(pid: u32, pids: Vec<u32>) -> KillResult {
-    let targets = if pids.is_empty() { vec![pid] } else { pids };
+fn kill_process(
+    state: tauri::State<AppState>,
+    id: String,
+    snapshot_token: String,
+    pids: Vec<u32>,
+) -> KillResult {
+    // 不信任前端直接提交的 PID。先用最新后端快照重新解析分组，只允许结束仍属于
+    // 该行且仍在用户确认时 PID 集合中的进程；PID 已被复用到别组时会被拒绝。
+    let targets = {
+        let sys = state.sys.lock().unwrap_or_else(|e| e.into_inner());
+        let idle = state.idle.lock().unwrap_or_else(|e| e.into_inner());
+        let protected = process::current_process_ancestors(&sys);
+        let expected: std::collections::HashSet<u32> = pids.into_iter().collect();
+        process::list_by_category(&sys, &idle, "all")
+            .into_iter()
+            .find(|row| row.id == id && row.snapshot_token == snapshot_token)
+            .map(|row| {
+                row.all_pids
+                    .into_iter()
+                    .filter(|pid| expected.contains(pid) && !protected.contains(pid))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    if targets.is_empty() {
+        return KillResult {
+            ok: false,
+            killed: Vec::new(),
+            error: Some("目标已变化、已退出或属于受保护进程，请刷新后重试".into()),
+        };
+    }
     kill::kill_group(&targets)
 }
 

@@ -52,6 +52,7 @@ interface State {
   list: AppRow[]; // 当前分类的原始（未排序未过滤）列表
   stats: SystemStats | null;
   loading: boolean;
+  loadError: string | null;
   theme: UiTheme;
   themePref: ThemePref;
 }
@@ -60,7 +61,7 @@ interface State {
 interface RowRefs {
   wrap: HTMLElement;      // 整组容器（主行 + 展开的 helper 行）
   row: HTMLElement;       // 主行
-  caret: HTMLElement;     // 展开箭头容器
+  caret: HTMLButtonElement; // 展开箭头容器
   nameLine: HTMLElement;  // 名称行（含端口）
   pathLine: HTMLElement;  // 路径行
   procWrap: HTMLElement;  // 进程数单元
@@ -88,6 +89,8 @@ class ProcKillApp {
   // 下一两次刷新仍可能列出它。在落列表前过滤掉这些 id，短时遮罩后自动失效。
   private recentlyKilled = new Map<string, number>();
   private static readonly KILL_MASK_MS = 4000;
+  private killingId: string | null = null;
+  private dialogReturnFocus: HTMLElement | null = null;
 
   // ---- 持久骨架节点引用（mount 后填充，永不为 null）----
   private win!: HTMLElement;
@@ -143,6 +146,7 @@ class ProcKillApp {
       list: [],
       stats: null,
       loading: true,
+      loadError: null,
       theme,
       themePref,
     };
@@ -256,11 +260,13 @@ class ProcKillApp {
       this.s.list = this.maskKilled(list);
       this.s.stats = stats;
       this.s.loading = false;
+      this.s.loadError = null;
       this.update();
     } catch (e) {
       if (seq !== this.loadSeq || cat !== this.s.cat) return;
       console.error("[ProcKill] load failed", e);
       this.s.loading = false;
+      this.s.loadError = "读取进程失败，请检查权限后重试";
       this.update();
     } finally {
       if (initial) this.startPolling();
@@ -280,29 +286,46 @@ class ProcKillApp {
           if (seq !== this.loadSeq || cat !== this.s.cat) return;
           this.s.list = this.maskKilled(list);
           this.s.stats = stats;
+          this.s.loadError = null;
           this.update();
         })
-        .catch(() => {});
+        .catch((error) => {
+          console.error("[ProcKill] polling failed", error);
+          this.s.loadError = "刷新失败，当前数据可能已过期";
+          this.update();
+        });
     }, REFRESH_MS);
   }
 
   // ---------- 操作 ----------
   private async doKill(app: AppRow): Promise<void> {
-    const before = this.visible.length;
-    const res = await this.bridge.killProcess(app);
-    this.s.dialogApp = null;
-    if (res.ok) {
-      // ① 让所有在途 load/polling 响应失效（它们仍含被 kill 的进程，回来会整包写回使其复活）
-      ++this.loadSeq;
-      // ② 短时遮罩该 id：真实后端进程退出有延迟，接下来一两次刷新仍可能列出它
-      this.recentlyKilled.set(app.id, performance.now() + ProcKillApp.KILL_MASK_MS);
-      this.s.list = this.s.list.filter((a) => a.id !== app.id);
-      const after = before - 1;
-      if (this.s.sel >= after) this.s.sel = Math.max(0, after - 1);
-    } else {
-      this.toast(`结束失败：${res.error || "权限不足或进程已退出"}`);
-    }
+    if (this.killingId) return;
+    this.killingId = app.id;
     this.update();
+    const before = this.visible.length;
+    try {
+      const res = await this.bridge.killProcess(app);
+      if (res.ok) {
+        this.s.dialogApp = null;
+        // ① 让所有在途 load/polling 响应失效（它们仍含被 kill 的进程，回来会整包写回使其复活）
+        ++this.loadSeq;
+        // ② 短时遮罩该 id：真实后端进程退出有延迟，接下来一两次刷新仍可能列出它
+        this.recentlyKilled.set(app.id, performance.now() + ProcKillApp.KILL_MASK_MS);
+        this.s.list = this.s.list.filter((a) => a.id !== app.id);
+        const after = before - 1;
+        if (this.s.sel >= after) this.s.sel = Math.max(0, after - 1);
+      } else {
+        this.toast(`结束失败：${res.error || "权限不足或进程已退出"}`);
+      }
+    } catch (error) {
+      console.error("[ProcKill] kill failed", error);
+      this.toast("结束失败：无法连接进程服务，请刷新后重试");
+    } finally {
+      this.killingId = null;
+      this.update();
+      if (!this.s.dialogApp) this.restoreDialogFocus();
+      else window.setTimeout(() => this.dialogLayer.querySelector<HTMLElement>("[data-dialog-primary]")?.focus(), 0);
+    }
   }
 
   // 过滤掉处于遮罩期内的、刚被 kill 的进程；顺便清理已过期的遮罩项。
@@ -317,9 +340,26 @@ class ProcKillApp {
   }
 
   private tryKill(app: AppRow | null): void {
-    if (!app) return;
+    if (!app || this.killingId) return;
     if (this.s.dontRemind) this.doKill(app);
-    else { this.s.dialogApp = app; this.update(); }
+    else {
+      this.dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      this.s.dialogApp = app;
+      this.update();
+      window.setTimeout(() => this.dialogLayer.querySelector<HTMLElement>("[data-dialog-primary]")?.focus(), 0);
+    }
+  }
+
+  private restoreDialogFocus(): void {
+    this.dialogReturnFocus?.focus();
+    this.dialogReturnFocus = null;
+  }
+
+  private closeDialog(): void {
+    if (this.killingId) return;
+    this.s.dialogApp = null;
+    this.update();
+    this.restoreDialogFocus();
   }
 
   private toggleExpand(app: AppRow | null): void {
@@ -414,23 +454,20 @@ class ProcKillApp {
       const s = this.s;
       if (s.dialogApp) {
         const dlg = s.dialogApp;
-        if (e.key === "Escape") { e.preventDefault(); s.dialogApp = null; this.update(); }
-        else if (e.key === "Enter") { e.preventDefault(); this.doKill(dlg); }
-        return;
-      }
-      // Tab：在分类 tab 间循环（不在输入框、未按修饰键时）
-      if (
-        e.key === "Tab" &&
-        !mod &&
-        !e.altKey &&
-        document.activeElement !== this.searchInput
-      ) {
-        e.preventDefault();
-        const idx = CATEGORIES.findIndex((c) => c.id === s.cat);
-        const next = e.shiftKey
-          ? (idx - 1 + CATEGORIES.length) % CATEGORIES.length
-          : (idx + 1) % CATEGORIES.length;
-        this.setCat(CATEGORIES[next].id);
+        if (e.key === "Escape") { e.preventDefault(); this.closeDialog(); }
+        else if (e.key === "Enter" && !this.killingId) { e.preventDefault(); this.doKill(dlg); }
+        else if (e.key === "Tab") {
+          const focusable = Array.from(this.dialogLayer.querySelectorAll<HTMLElement>("button, [tabindex]:not([tabindex='-1'])"))
+            .filter((el) => !el.hasAttribute("disabled"));
+          if (focusable.length) {
+            e.preventDefault();
+            const current = focusable.indexOf(document.activeElement as HTMLElement);
+            const next = e.shiftKey
+              ? (current <= 0 ? focusable.length - 1 : current - 1)
+              : (current + 1) % focusable.length;
+            focusable[next].focus();
+          }
+        }
         return;
       }
       // ⌘1–6 / Ctrl1–6 切分类（Windows/Linux 用 Ctrl，已由 e.ctrlKey 覆盖）
@@ -541,7 +578,7 @@ class ProcKillApp {
   private buildHeader(): HTMLElement {
     const s = this.s;
 
-    const brand = appIcon({ id: "__brand", name: "鹅的监控", monogram: "鹅", color: "#F5B544", procs: 1, cpu: 0, mem: 0, pid: 0, path: "", helpers: [], iconUrl: BRAND_ICON_URL } as AppRow, 18, 5);
+    const brand = appIcon({ id: "__brand", identity: "brand:goose-monitor", snapshotToken: "brand", name: "鹅的监控", monogram: "鹅", color: "#F5B544", procs: 1, cpu: 0, mem: 0, pid: 0, path: "", helpers: [], iconUrl: BRAND_ICON_URL }, 18, 5);
     // 视图标题用衬线显示体(Newsreader + Noto Serif SC),复刻 goose-run 暖极简标题
     this.titleText = h("span", { style: { font: "600 16px/22px var(--font-serif)", color: "var(--fg-1)", whiteSpace: "nowrap" }, text: "鹅的监控" });
     this.countBadge = h("span", {
@@ -666,10 +703,11 @@ class ProcKillApp {
     const s = this.s;
     const tabs = h("div", {
       className: "pk-cat-tabs",
+      attrs: { role: "tablist", "aria-label": "进程分类" },
       style: {
         height: "34px", flex: "none", display: "flex", alignItems: "center", gap: "4px",
         padding: "0 12px", borderBottom: "1px solid var(--border-1)",
-        background: "var(--bg-sidebar)", overflow: "hidden",
+        background: "var(--bg-sidebar)", overflowX: "auto", overflowY: "hidden",
       },
     });
     this.navKbds = [];
@@ -680,6 +718,7 @@ class ProcKillApp {
       const key = kbd(`${modKeyLabel}${c.key}`, kbdWide, "pk-cat-kbd");
       this.navKbds.push(key);
       const btn = h("button", {
+        attrs: { role: "tab", "aria-selected": c.id === s.cat ? "true" : "false" },
         style: {
           display: "inline-flex", alignItems: "center", gap: "6px", height: "24px",
           padding: "0 9px", borderRadius: "7px", border: "1px solid transparent",
@@ -713,7 +752,7 @@ class ProcKillApp {
     // 搜索栏（持久，按 searchOn 显隐）。uTools 环境下叠加「接管」视觉。
     const umode = this.isUtools;
     this.searchInput = h("input", {
-      attrs: { placeholder: umode ? "uTools 输入框已接管，输入即过滤…" : "过滤应用或路径…" },
+      attrs: { placeholder: umode ? "uTools 输入框已接管，输入即过滤…" : "过滤名称、路径、PID 或 Helper…", "aria-label": "过滤进程" },
       style: {
         flex: "1", background: "transparent", border: "none", outline: "none",
         color: "var(--fg-1)", font: "var(--t-base)",
@@ -763,7 +802,7 @@ class ProcKillApp {
     // 列表滚动区（持久）
     this.scroll = h("div", {
       className: "scroll",
-      attrs: { id: "pk-scroll" },
+      attrs: { id: "pk-scroll", role: "listbox", "aria-label": "进程列表" },
       style: { flex: "1 1 auto", minHeight: "0", overflowY: "auto" },
     });
     // 空态/加载态提示（持久，按需显隐）
@@ -806,7 +845,8 @@ class ProcKillApp {
 
     this.footerSelName = h("span", { className: "t-xs", style: { color: "var(--fg-3)", display: "none" } });
     this.footerStats = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", whiteSpace: "nowrap" }, text: "tauri · utools" });
-    this.footerKillBtn = h("span", {
+    this.footerKillBtn = h("button", {
+      attrs: { type: "button" },
       className: "pk-footer-close",
       on: { click: () => this.tryKill(this.selApp) },
       children: [document.createTextNode("关闭 "), enterKey()],
@@ -913,11 +953,16 @@ class ProcKillApp {
       ref.btn.style.background = on ? "var(--bg-row-sel)" : "transparent";
       ref.btn.style.borderColor = on ? "var(--border-2)" : "transparent";
       ref.label.style.color = on ? "var(--fg-1)" : "var(--fg-2)";
+      ref.btn.setAttribute("aria-selected", on ? "true" : "false");
     }
     const stats = s.stats;
     const cpuPct = stats ? Math.round(stats.cpuPercent) : 0;
     const memUsed = stats ? stats.memUsedMb : 0;
-    if (this.footerStats) this.footerStats.textContent = `${this.bridge.name} · CPU ${cpuPct}% · 内存 ${fmtMem(memUsed)}`;
+    if (this.footerStats) {
+      this.footerStats.textContent = this.s.loadError
+        ? `${this.bridge.name} · ${this.s.loadError}`
+        : `${this.bridge.name} · CPU ${cpuPct}% · 内存 ${fmtMem(memUsed)}`;
+    }
   }
 
   private updateSearchBar(): void {
@@ -936,6 +981,11 @@ class ProcKillApp {
     // 加载中且无数据：显示加载态，清空行
     if (s.loading && v.length === 0) {
       this.showEmpty("正在读取进程…");
+      this.clearAllRows();
+      return;
+    }
+    if (s.loadError && v.length === 0) {
+      this.showEmpty(s.loadError);
       this.clearAllRows();
       return;
     }
@@ -1024,6 +1074,7 @@ class ProcKillApp {
     const wrap = h("div");
 
     const caret = h("button", {
+      attrs: { type: "button", "aria-label": `${a.name} 的子进程`, "aria-expanded": "false" },
       style: {
         width: "16px", height: "16px", display: "grid", placeItems: "center",
         border: "none", background: "transparent", cursor: "pointer", padding: "0",
@@ -1046,6 +1097,7 @@ class ProcKillApp {
     const pidCell = h("div", { style: { textAlign: "right", font: "var(--t-mono-sm)", color: "var(--fg-3)" } });
 
     const row = h("div", {
+      attrs: { role: "option", tabindex: "-1", "aria-selected": "false" },
       style: {
         display: "grid", gridTemplateColumns: layoutForCat(this.s.cat).gridTemplate, alignItems: "center", gap: "6px",
         padding: "0 12px", height: "30px", cursor: "pointer", position: "relative",
@@ -1155,12 +1207,16 @@ class ProcKillApp {
 
     // 选中态
     ref.row.style.background = selected ? "var(--bg-row-sel)" : "transparent";
-    ref.row.style.boxShadow = selected ? "inset 2px 0 0 var(--accent)" : "none";
+    ref.row.style.boxShadow = selected ? "inset 0 0 0 1px var(--accent)" : "none";
     if (selected) ref.row.setAttribute("data-sel", "1");
     else ref.row.removeAttribute("data-sel");
+    ref.row.setAttribute("aria-selected", selected ? "true" : "false");
+    ref.row.tabIndex = selected ? 0 : -1;
 
     // 展开箭头
     ref.caret.style.cursor = a.helpers.length ? "pointer" : "default";
+    ref.caret.setAttribute("aria-expanded", expanded ? "true" : "false");
+    ref.caret.disabled = a.helpers.length === 0;
     ref.caret.replaceChildren();
     if (a.helpers.length > 0) {
       ref.caret.appendChild(icon(expanded ? "chevron-down" : "chevron-right", 13, { color: "var(--fg-3)" } as any));
@@ -1250,16 +1306,17 @@ class ProcKillApp {
     const s = this.s;
     const scrim = h("div", {
       className: "scrim",
+      attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": "pk-confirm-title" },
       style: {
         position: "absolute", inset: "0", background: "rgba(20,15,10,0.52)",
         backdropFilter: "blur(3px)", display: "grid", placeItems: "center", zIndex: "50",
       },
-      on: { click: () => { s.dialogApp = null; this.update(); } },
+      on: { click: () => this.closeDialog() },
     });
     const card = h("div", {
       className: "dialog-card",
       style: {
-        width: "372px", borderRadius: "16px", background: "var(--bg-elev)",
+        width: "372px", maxWidth: "calc(100vw - 24px)", borderRadius: "16px", background: "var(--bg-elev)",
         border: "1px solid var(--border-2)", boxShadow: "var(--shadow-pop)", padding: "22px",
       },
       on: { click: (e) => e.stopPropagation() },
@@ -1278,7 +1335,7 @@ class ProcKillApp {
     iconWrap.appendChild(badge);
 
     const titleBox = h("div", { style: { minWidth: "0" }, children: [
-      h("div", { style: { font: "var(--t-lg)", color: "var(--fg-1)" }, text: `结束 ${app.name}？` }),
+      h("div", { attrs: { id: "pk-confirm-title" }, style: { font: "var(--t-lg)", color: "var(--fg-1)" }, text: `结束 ${app.name}？` }),
       h("div", { className: "t-path", style: { marginTop: "2px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, text: `PID ${app.pid} · ${app.path}` }),
     ] });
 
@@ -1299,8 +1356,13 @@ class ProcKillApp {
       },
     });
     if (s.dontRemind) checkbox.appendChild(icon("check", 13, { color: "#fff" } as any));
-    const label = h("label", {
-      style: { display: "flex", alignItems: "center", gap: "9px", marginTop: "16px", cursor: "pointer", userSelect: "none" },
+    const label = h("button", {
+      attrs: { type: "button", role: "checkbox", "aria-checked": s.dontRemind ? "true" : "false" },
+      style: {
+        display: "flex", alignItems: "center", gap: "9px", marginTop: "16px", padding: "0",
+        border: "none", background: "transparent", color: "inherit", font: "inherit",
+        cursor: "pointer", userSelect: "none",
+      },
       on: { click: () => {
         s.dontRemind = !s.dontRemind;
         this.bridge.setPref("pk_dont_remind", s.dontRemind ? "1" : "0");
@@ -1317,17 +1379,19 @@ class ProcKillApp {
         fontWeight: "500", cursor: "pointer", display: "inline-flex", alignItems: "center",
         justifyContent: "center", gap: "7px",
       },
-      on: { click: () => { s.dialogApp = null; this.update(); } },
+      on: { click: () => this.closeDialog() },
       children: [document.createTextNode("取消 "), kbd("Esc")],
     });
     const killBtn = h("button", {
+      attrs: { "data-dialog-primary": "", ...(this.killingId ? { disabled: "" } : {}) },
       style: {
         flex: "1.2", height: "38px", borderRadius: "9px", background: "var(--danger)",
         border: "none", color: "#fff", font: "var(--t-base)", fontWeight: "600",
-        cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "7px",
+        cursor: this.killingId ? "wait" : "pointer", opacity: this.killingId ? "0.72" : "1",
+        display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "7px",
       },
       on: { click: () => this.doKill(app) },
-      children: [document.createTextNode("关闭 "), enterKey()],
+      children: [document.createTextNode(this.killingId ? "正在结束…" : "关闭 "), ...(this.killingId ? [] : [enterKey()])],
     });
     card.appendChild(h("div", { style: { display: "flex", gap: "10px", marginTop: "20px" }, children: [cancelBtn, killBtn] }));
 

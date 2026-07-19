@@ -1,13 +1,6 @@
 /* 菜单栏（状态栏）模式 —— Tauri 状态栏图标下挂的 popover。
-   像素级复刻设计稿 v8_tray.jsx 的最终（去噪）形态，并接上真实 bridge 数据与交互：
-     · 默认弹层（V8Tray）   —— 行只保留「勾选框 · 图标 · 名称 · CPU」（去掉了 ⋯ 与逐行电源键）；
-                             顶部红色「结束所选 N」批量结束 + 搜索框；底部键盘 legend + 偏好齿轮。
-                             键盘优先：↑↓ 移动 cursor · ␣ 勾选 · ⌘⏎ 结束所选 · ⌘F 搜索 · ⌘, 偏好。
-     · 偏好设置（V8Settings）—— 自动清理：空闲应用自动结束（条件可定义：空闲超过 [N 分钟▾] 且 CPU [< N%▾]）、
-                             结束前二次确认、开机时随系统启动。
-
-   注意：按用户 chat3 反馈「自动关闭菜单不要有 不需要」——已删除「无操作自动收起 / 倒计时」整套
-   （分段控件 + 环形倒计时 + 底部计时条），仅保留可定义的「自动清理空闲应用」。
+   提供应用多选与批量结束、定时退出、自动清理线和偏好设置。
+   键盘优先：↑↓ 移动 cursor · ␣ 勾选 · ⌘⏎ 结束所选 · ⌘F 搜索 · ⌘, 偏好。
 
    同一份前端，两种宿主：
    - Tauri popover 窗口：透明背景，卡片填满窗口（?popover 由 Rust 端注入，亦自动探测）。
@@ -71,6 +64,7 @@ interface TrayState {
   cursor: number;                 // 键盘 cursor 行索引（↑↓ 移动）
   query: string;
   loading: boolean;
+  loadError: string | null;
   theme: UiTheme;
   themePref: ThemePref;
   // 偏好（持久化）
@@ -87,11 +81,10 @@ interface TrayState {
   timerTargetIds: string[];
   scheduleRules: ScheduleRule[];
   // ---- 清理线 v2 状态 ----
-  cleanOn: boolean;               // 清理线开关（default true）
+  cleanOn: boolean;               // 清理线开关（必须由用户明确开启）
   threshold: number;              // 清理线阈值（分钟，default 60）
   exempt: Set<string>;            // 豁免应用 id 集合
-  env: "app" | "utools";          // 运行环境
-  notify: boolean;                // 退出前弹出通知
+  env: "app" | "utools";          // 实际运行宿主，只读推断，不作为用户偏好
 }
 
 interface ScheduleRule {
@@ -120,6 +113,7 @@ interface CleanRowRefs {
   metricProcs: HTMLElement;      // ×procs
   metricCpu: HTMLElement;        // cpu%
   metricMem: HTMLElement;        // mem MB
+  metricDivider: HTMLElement;    // 指标与状态分隔线
   metricStatus: HTMLElement;     // 状态文字
   rightHolder: HTMLElement;      // 右侧区（ExemptCheck 或闲置文字）
   signature: string;             // 上次渲染签名，跳过无变化 tick
@@ -132,7 +126,10 @@ class TrayApp {
   private refreshTimer: number | null = null;
   private countdownTimer: number | null = null;
   private scheduleTimer: number | null = null;
+  private countdownDeadline: number | null = null;
   private pendingConfirmCancel: (() => void) | null = null;
+  private confirmReturnFocus: HTMLElement | null = null;
+  private killing = false;
   private loadSeq = 0;
   private recentlyKilled = new Map<string, number>();
   private static readonly KILL_MASK_MS = 4000;
@@ -173,29 +170,26 @@ class TrayApp {
     // Tauri popover 窗口由 Rust 端用 ?popover=1 加载；浏览器默认渲染完整场景预览。
     this.previewScene = !this.isTauri && !params.has("popover");
 
-    // 读取豁免列表（JSON 数组）；从未设置过时预置 wechat（贴合设计默认「保留」示例）
+    // 读取豁免列表（JSON 数组）。不预置任何虚构 id，用户明确勾选后才持久化。
     const exemptRaw = this.bridge.getPref("pk_tray_exempt");
     const exemptArr: string[] = (() => {
-      if (exemptRaw == null) return ["wechat"];
+      if (exemptRaw == null) return [];
       try { return JSON.parse(exemptRaw) as string[]; } catch { return []; }
     })();
     // 读取清理线阈值（必须落在 STOPS 内，否则默认 60）
     const thrRaw = this.bridge.getPref("pk_tray_threshold");
     const thrNum = thrRaw ? Number(thrRaw) : NaN;
     const threshold = STOPS.includes(thrNum) ? thrNum : 60;
-    // 推断运行环境（utools bridge 默认 utools，其余 app）
-    const envRaw = this.bridge.getPref("pk_tray_env");
-    const env: "app" | "utools" = envRaw === "utools" ? "utools"
-      : envRaw === "app" ? "app"
-      : (this.bridge.name === "utools" ? "utools" : "app");
+    const env: "app" | "utools" = this.bridge.name === "utools" ? "utools" : "app";
 
     this.s = {
-      view: "clean",   // 默认视图即清理线方案
+      view: "default",
       list: [],
       selected: new Set(),
       cursor: 0,
       query: "",
       loading: true,
+      loadError: null,
       ...(() => {
         const ts = resolveThemeState(this.bridge.getPref(THEME_PREF_KEY), this.bridge.name === "utools");
         return { theme: ts.theme, themePref: ts.themePref };
@@ -213,11 +207,10 @@ class TrayApp {
       timerTargetIds: [],
       scheduleRules: this.readScheduleRules(),
       // 清理线 v2
-      cleanOn: this.bridge.getPref("pk_tray_cleanon") !== "0", // 默认开
+      cleanOn: this.bridge.getPref("pk_tray_cleanon") === "1", // 高风险操作必须显式开启
       threshold,
       exempt: new Set(exemptArr),
       env,
-      notify: this.bridge.getPref("pk_tray_notify") !== "0", // 默认开
     };
     this.refreshResolvedTheme();
   }
@@ -266,12 +259,17 @@ class TrayApp {
     this.s.themePref = pref;
     this.bridge.setPref(THEME_PREF_KEY, pref);
     this.refreshResolvedTheme();
-    this.closeSettings();
-    this.openSettings();
+    this.bodySettings.querySelectorAll<HTMLElement>("[data-theme-pref]").forEach((button) => {
+      const on = button.dataset.themePref === pref;
+      button.setAttribute("aria-pressed", on ? "true" : "false");
+      button.style.background = on ? "var(--bg-row-sel)" : "transparent";
+      button.style.color = on ? "var(--accent)" : "var(--fg-2)";
+      button.style.boxShadow = on ? "inset 0 0 0 1px var(--accent)" : "none";
+    });
   }
 
   private buildAppearanceSeg(): HTMLElement {
-    const seg = h("div", { style: { display: "flex", gap: "3px", padding: "3px", borderRadius: "11px", background: "var(--bg-input)", border: "1px solid var(--border-1)" } });
+    const seg = h("div", { attrs: { role: "group", "aria-label": "外观" }, style: { display: "flex", gap: "3px", padding: "3px", borderRadius: "11px", background: "var(--bg-input)", border: "1px solid var(--border-1)" } });
     const items: Array<[ThemePref, string, string]> = [
       ["auto", "跟随电脑", "monitor"],
       ["light", "浅色", "sun"],
@@ -280,6 +278,7 @@ class TrayApp {
     for (const [id, label, iconName] of items) {
       const on = this.s.themePref === id;
       seg.appendChild(h("button", {
+        attrs: { "data-theme-pref": id, "aria-pressed": on ? "true" : "false" },
         style: {
           flex: "1", height: "32px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "6px",
           borderRadius: "8px", border: "none", cursor: "pointer", font: "var(--t-sm)", fontWeight: "700",
@@ -304,7 +303,10 @@ class TrayApp {
       const list = await this.bridge.listProcesses("gui");
       if (seq !== this.loadSeq) return;
       this.s.list = this.maskKilled(list);
+      const liveIds = new Set(this.s.list.map((app) => app.id));
+      this.s.selected = new Set([...this.s.selected].filter((id) => liveIds.has(id)));
       this.s.loading = false;
+      this.s.loadError = null;
       if (this.s.view === "clean") {
         this.renderCleanBody();
       } else {
@@ -316,7 +318,9 @@ class TrayApp {
       if (seq !== this.loadSeq) return;
       console.error("[Tray] load failed", e);
       this.s.loading = false;
-      if (this.s.view !== "clean") this.updateList();
+      this.s.loadError = "读取应用失败，请稍后重试";
+      if (this.s.view === "clean") this.renderCleanBody();
+      else this.updateList();
     } finally {
       if (initial) this.startPolling();
     }
@@ -332,6 +336,9 @@ class TrayApp {
         .then((list) => {
           if (seq !== this.loadSeq) return;
           this.s.list = this.maskKilled(list);
+          const liveIds = new Set(this.s.list.map((app) => app.id));
+          this.s.selected = new Set([...this.s.selected].filter((id) => liveIds.has(id)));
+          this.s.loadError = null;
           if (this.s.view === "clean") {
             // clean 视图：刷新清理线列表
             this.renderCleanBody();
@@ -341,7 +348,12 @@ class TrayApp {
           }
           void this.maybeAutoClean();
         })
-        .catch(() => {});
+        .catch((error) => {
+          console.error("[Tray] polling failed", error);
+          this.s.loadError = "刷新失败，当前数据可能已过期";
+          if (this.s.view === "clean") this.renderCleanBody();
+          else this.updateList();
+        });
     }, REFRESH_MS);
   }
 
@@ -384,8 +396,8 @@ class TrayApp {
     if (!useV2 && !useOld) return;
 
     const targets = this.s.list.filter((a) => {
-      if (a.sys || this.recentlyKilled.has(a.id)) return false;
-      if (!this.s.exempt.has(a.id) && useV2) {
+      if (a.sys || !a.autoCleanEligible || this.recentlyKilled.has(a.id)) return false;
+      if (!this.s.exempt.has(this.identityOf(a)) && useV2) {
         // v2：闲置 ≥ 阈值
         return typeof a.idleMinutes === "number" && a.idleMinutes >= this.s.threshold;
       }
@@ -398,8 +410,8 @@ class TrayApp {
     if (!targets.length) return;
     this.autoCleaning = true;
     try {
-      await this.doKill(targets);
-      this.toast(`自动清理：已结束 ${targets.length} 个闲置应用`);
+      const result = await this.doKill(targets);
+      if (result.succeeded > 0) this.toast(`自动清理：已结束 ${result.succeeded} 个闲置应用`);
       // 清理线视图刷新
       if (this.s.view === "clean") this.renderCleanBody();
     } finally {
@@ -438,6 +450,10 @@ class TrayApp {
     this.updateKillBtn();
   }
 
+  private identityOf(app: AppRow): string {
+    return app.identity || app.id;
+  }
+
   // 把 cursor 移到某行（点击行时同步），并触发选中态高亮刷新。
   private setCursorById(id: string): void {
     const idx = this.visible.findIndex((a) => a.id === id);
@@ -473,6 +489,7 @@ class TrayApp {
 
   private async confirmKillTargets(targets: AppRow[], title: string): Promise<boolean> {
     if (!targets.length) return false;
+    this.confirmReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const names = targets.map((a) => a.name).slice(0, 3).join("、") + (targets.length > 3 ? ` 等 ${targets.length} 个` : "");
     return new Promise((resolve) => {
       let dontRemind = false;
@@ -480,36 +497,47 @@ class TrayApp {
         if (ok && dontRemind) this.setPref("confirmKill", false, "pk_tray_confirm", "0");
         this.pendingConfirmCancel = null;
         this.hideConfirmLayer();
+        this.confirmReturnFocus?.focus();
+        this.confirmReturnFocus = null;
         resolve(ok);
       };
       this.pendingConfirmCancel = () => close(false);
       const checkBox = h("span", { style: { width: "16px", height: "16px", borderRadius: "5px", border: "1.5px solid var(--border-strong)", display: "grid", placeItems: "center", flex: "none" } });
+      let checkButton: HTMLElement;
       const toggle = () => {
         dontRemind = !dontRemind;
+        checkButton.setAttribute("aria-checked", dontRemind ? "true" : "false");
         checkBox.style.background = dontRemind ? "var(--accent)" : "transparent";
         checkBox.style.borderColor = dontRemind ? "var(--accent)" : "var(--border-strong)";
         checkBox.replaceChildren(...(dontRemind ? [icon("check", 11, { color: "var(--fg-on-accent)" } as any)] : []));
       };
+      checkButton = h("button", {
+        attrs: { role: "checkbox", "aria-checked": "false" },
+        style: { marginTop: "14px", width: "100%", display: "flex", alignItems: "center", gap: "8px", padding: "0", border: "none", background: "transparent", color: "var(--fg-2)", cursor: "pointer", font: "var(--t-sm)", textAlign: "left" },
+        on: { click: toggle },
+        children: [checkBox, document.createTextNode("以后不再提醒")],
+      });
       const card = h("div", {
         style: { width: "300px", borderRadius: "14px", background: "var(--bg-elev)", border: "1px solid var(--border-2)", boxShadow: "var(--shadow-pop)", padding: "18px", color: "var(--fg-1)" },
         children: [
           h("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: [
             h("span", { style: { width: "34px", height: "34px", borderRadius: "10px", display: "grid", placeItems: "center", background: "var(--danger-bg)", color: "var(--danger-fg)" }, children: [icon("power", 18)] }),
             h("div", { children: [
-              h("div", { style: { font: "var(--t-lg)", fontWeight: "700", color: "var(--fg-1)" }, text: title }),
+              h("div", { attrs: { id: "tray-confirm-title" }, style: { font: "var(--t-lg)", fontWeight: "700", color: "var(--fg-1)" }, text: title }),
               h("div", { style: { font: "var(--t-xs)", color: "var(--fg-3)", marginTop: "2px" }, text: `${targets.length} 个应用 · Enter 确认` }),
             ] }),
           ] }),
           h("p", { style: { margin: "14px 0 0", font: "var(--t-sm)", color: "var(--fg-2)" }, text: `将强制结束 ${names} 及其合并的子进程，未保存内容可能会丢失。` }),
-          h("button", { style: { marginTop: "14px", width: "100%", display: "flex", alignItems: "center", gap: "8px", padding: "0", border: "none", background: "transparent", color: "var(--fg-2)", cursor: "pointer", font: "var(--t-sm)", textAlign: "left" }, on: { click: toggle }, children: [checkBox, document.createTextNode("以后不再提醒")] }),
+          checkButton,
           h("div", { style: { display: "flex", gap: "10px", marginTop: "18px" }, children: [
             h("button", { style: { flex: "1", height: "36px", borderRadius: "10px", border: "1px solid var(--border-2)", background: "var(--bg-panel)", color: "var(--fg-1)", cursor: "pointer", font: "var(--t-base)", fontWeight: "600" }, on: { click: () => close(false) }, text: "取消" }),
-            h("button", { style: { flex: "1", height: "36px", borderRadius: "10px", border: "none", background: "var(--danger)", color: "var(--fg-on-accent)", cursor: "pointer", font: "var(--t-base)", fontWeight: "700" }, on: { click: () => close(true) }, text: "结束" }),
+            h("button", { attrs: { "data-confirm-primary": "" }, style: { flex: "1", height: "36px", borderRadius: "10px", border: "none", background: "var(--danger)", color: "var(--fg-on-accent)", cursor: "pointer", font: "var(--t-base)", fontWeight: "700" }, on: { click: () => close(true) }, text: "结束" }),
           ] }),
         ],
       });
       this.confirmLayer.style.display = "grid";
       this.confirmLayer.replaceChildren(card);
+      window.setTimeout(() => this.confirmLayer.querySelector<HTMLElement>("[data-confirm-primary]")?.focus(), 0);
     });
   }
 
@@ -524,23 +552,37 @@ class TrayApp {
     else this.hideConfirmLayer();
   }
 
-  private async doKill(targets: AppRow[]): Promise<void> {
+  private async doKill(targets: AppRow[]): Promise<{ succeeded: number; failed: number }> {
+    if (this.killing) return { succeeded: 0, failed: 0 };
+    this.killing = true;
+    let succeeded = 0;
+    let failed = 0;
     for (const app of targets) {
       try {
         const res = await this.bridge.killProcess(app);
         if (res.ok) {
+          succeeded += 1;
           this.recentlyKilled.set(app.id, performance.now() + TrayApp.KILL_MASK_MS);
           this.s.list = this.s.list.filter((a) => a.id !== app.id);
           this.s.selected.delete(app.id);
+        } else {
+          failed += 1;
+          console.error(`[Tray] kill failed: ${app.name}`, res.error);
         }
-      } catch { /* 单个失败不阻断其余 */ }
+      } catch (error) {
+        failed += 1;
+        console.error(`[Tray] kill failed: ${app.name}`, error);
+      }
     }
+    this.killing = false;
     ++this.loadSeq; // 让在途刷新失效，避免被 kill 的进程复活
     // cursor 收敛到有效范围
     const v = this.visible;
     if (this.s.cursor >= v.length) this.s.cursor = Math.max(0, v.length - 1);
     this.updateList();
     this.updateKillBtn();
+    if (failed > 0) this.toast(`已结束 ${succeeded} 个，${failed} 个失败；请刷新后重试`);
+    return { succeeded, failed };
   }
 
   private setPref<K extends keyof TrayState>(key: K, value: TrayState[K], storeKey: string, storeVal: string): void {
@@ -582,6 +624,7 @@ class TrayApp {
     this.popover.appendChild(this.menuLayer);
 
     this.confirmLayer = h("div", {
+      attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": "tray-confirm-title" },
       style: {
         position: "absolute", inset: "0", zIndex: "70", display: "none", placeItems: "center",
         background: "rgba(8,9,12,0.48)", backdropFilter: "blur(3px)", pointerEvents: "auto",
@@ -640,9 +683,8 @@ class TrayApp {
     // 箭头（指向 tray 图标）
     const caret = h("div", {
       style: {
-        position: "absolute", top: "30px", right: "27px", width: "0", height: "0",
-        borderLeft: "7px solid transparent", borderRight: "7px solid transparent",
-        borderBottom: "7px solid var(--bg-panel)",
+        position: "absolute", top: "30px", right: "27px", width: "14px", height: "7px",
+        background: "var(--bg-panel)", clipPath: "polygon(50% 0, 100% 100%, 0 100%)",
         filter: "drop-shadow(0 -1px 0 var(--border-2))", zIndex: "2",
       },
     });
@@ -661,7 +703,7 @@ class TrayApp {
   // 品牌 logo 方块（鹅的监控真实图标）
   private brandTile(size = 22, radius = 6): HTMLElement {
     return appIcon(
-      { id: "__brand", name: "鹅的监控", monogram: "鹅", color: "#F5B544", procs: 1, cpu: 0, mem: 0, pid: 0, path: "", helpers: [], iconUrl: BRAND_ICON_URL } as AppRow,
+      { id: "__brand", identity: "brand:goose-monitor", snapshotToken: "brand", name: "鹅的监控", monogram: "鹅", color: "#F5B544", procs: 1, cpu: 0, mem: 0, pid: 0, path: "", helpers: [], iconUrl: BRAND_ICON_URL },
       size, radius,
     );
   }
@@ -691,16 +733,27 @@ class TrayApp {
     const timerBtn = h("button", {
       attrs: { title: "定时退出" },
       style: {
-        width: "100%", height: "40px", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+        flex: "1", height: "40px", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
         borderRadius: "10px", border: "1px solid var(--border-2)", background: "var(--bg-elev)", color: "var(--fg-1)",
-        cursor: "pointer", font: "var(--t-base)", fontWeight: "700", marginTop: "8px",
+        cursor: "pointer", font: "var(--t-base)", fontWeight: "700",
       },
       on: { click: () => this.openTimer("countdown") },
       children: [icon("clock", 16, { color: "var(--accent)" } as any), document.createTextNode("定时退出")],
     });
+    const cleanBtn = h("button", {
+      attrs: { title: "自动清理" },
+      style: {
+        flex: "1", height: "40px", display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+        borderRadius: "10px", border: "1px solid var(--border-2)", background: "var(--bg-elev)", color: "var(--fg-1)",
+        cursor: "pointer", font: "var(--t-base)", fontWeight: "700",
+      },
+      on: { click: () => this.openClean() },
+      children: [icon("alarm-clock", 16, { color: "var(--accent)" } as any), document.createTextNode("自动清理")],
+    });
+    const actionRow = h("div", { style: { display: "flex", gap: "8px", marginTop: "8px" }, children: [timerBtn, cleanBtn] });
 
     this.searchInput = h("input", {
-      attrs: { placeholder: "搜索应用…" },
+      attrs: { placeholder: "搜索应用…", "aria-label": "搜索应用" },
       style: {
         flex: "1", background: "transparent", border: "none", outline: "none",
         color: "var(--fg-1)", font: "var(--t-row)",
@@ -719,11 +772,12 @@ class TrayApp {
       ],
     });
 
-    body.appendChild(h("div", { style: { padding: "12px 12px 6px" }, children: [this.killBtn, timerBtn, searchBar] }));
+    body.appendChild(h("div", { style: { padding: "12px 12px 6px" }, children: [this.killBtn, actionRow, searchBar] }));
 
     // —— 列表区 ——
     this.listBox = h("div", {
       className: "tray-scroll tray-listbox",
+      attrs: { role: "listbox", "aria-label": "应用列表", "aria-multiselectable": "true" },
       style: { padding: "2px 6px 8px", display: "flex", flexDirection: "column", gap: "1px", flex: "1", minHeight: "0", overflowY: "auto" },
     });
     this.emptyEl = h("div", { style: { padding: "30px", textAlign: "center", color: "var(--fg-3)", font: "var(--t-sm)", display: "none" } });
@@ -785,13 +839,12 @@ class TrayApp {
       children: [
         back,
         h("span", { style: { font: "var(--t-lg)", fontWeight: "700", color: "var(--fg-1)" }, text: "偏好设置" }),
-        h("span", { style: { marginLeft: "auto", marginRight: "6px", font: "var(--t-xs)", color: "var(--fg-3)" }, text: "Preferences" }),
       ],
     }));
 
     // —— 自动清理 ——
-    const confirmSwitch = this.switch(this.s.confirmKill, (on) => this.setPref("confirmKill", on, "pk_tray_confirm", on ? "1" : "0"));
-    const autostartSwitch = this.switch(this.s.autostart, (on) => {
+    const confirmSwitch = this.switch("结束前二次确认", this.s.confirmKill, (on) => this.setPref("confirmKill", on, "pk_tray_confirm", on ? "1" : "0"));
+    const autostartSwitch = this.switch("开机时随系统启动", this.s.autostart, (on) => {
       this.setPref("autostart", on, "pk_tray_autostart", on ? "1" : "0");
       if (this.isTauri) {
         const inv = (window as any).__TAURI__?.core?.invoke;
@@ -799,34 +852,20 @@ class TrayApp {
       }
     });
 
-    // 运行环境分段控件
     const appearanceSeg = this.buildAppearanceSeg();
-
-    const envSeg = this.buildEnvSeg();
-
-    // 通知开关
-    const notifySwitch = this.switch(this.s.notify, (on) => {
-      this.s.notify = on;
-      this.bridge.setPref("pk_tray_notify", on ? "1" : "0");
-    });
 
     // 清理线提示文字
     const cleanHintEl = h("div", {
       style: { font: "var(--t-xs)", color: "var(--fg-3)", padding: "4px 14px 10px 14px", lineHeight: "1.55" },
-      text: "点主界面工具栏的闹钟图标开启清理线；过线应用默认会被退出，勾选「不自动清理」即可保留。",
+      text: "点主界面工具栏的闹钟图标开启清理线；开启后，仅过线且未标记「不自动清理」的应用会被退出。",
     });
 
     body.appendChild(h("div", { style: { padding: "4px 0 2px", overflowY: "auto" }, children: [
       h("div", { className: "t-label", style: { padding: "10px 14px 4px" }, text: "外观" }),
       h("div", { style: { padding: "0 12px 10px" }, children: [appearanceSeg] }),
       h("div", { style: { height: "1px", background: "var(--border-1)", margin: "0 12px 6px" } }),
-      h("div", { className: "t-label", style: { padding: "10px 14px 4px" }, text: "运行环境" }),
-      h("div", { style: { padding: "0 12px 10px" }, children: [envSeg] }),
-
-      h("div", { style: { height: "1px", background: "var(--border-1)", margin: "0 12px 6px" } }),
 
       h("div", { className: "t-label", style: { padding: "10px 14px 4px" }, text: "自动清理" }),
-      this.setRow(this.s.notify ? "bell" : "bell-off", null, "退出前提醒", "过线应用被退出前弹出通知，可一键勾选「不自动清理」", notifySwitch),
       cleanHintEl,
 
       h("div", { style: { height: "1px", background: "var(--border-1)", margin: "0 12px 6px" } }),
@@ -851,47 +890,6 @@ class TrayApp {
       ],
     }));
     return body;
-  }
-
-  /** 运行环境分段控件（CSeg：常驻 App / uTools 插件）。 */
-  private buildEnvSeg(): HTMLElement {
-    const seg = h("div", { style: { display: "flex", gap: "3px", padding: "3px", borderRadius: "11px", background: "var(--bg-input)", border: "1px solid var(--border-1)" } });
-    const items: Array<[string, string, string]> = [
-      ["app", "常驻 App", "rocket"],
-      ["utools", "uTools 插件", "layout-grid"],
-    ];
-    for (const [id, label, iconName] of items) {
-      const on = this.s.env === id;
-      seg.appendChild(h("button", {
-        style: { flex: "1", height: "32px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "6px", borderRadius: "8px", border: "none", cursor: "pointer", font: "var(--t-sm)", fontWeight: "700", background: on ? "var(--bg-row-sel)" : "transparent", color: on ? "var(--accent)" : "var(--fg-2)", boxShadow: on ? "inset 0 0 0 1px var(--accent)" : "none" },
-        on: { click: () => {
-          this.s.env = id as "app" | "utools";
-          this.bridge.setPref("pk_tray_env", id);
-          // 重建设置页以刷新说明卡片
-          this.closeSettings();
-          this.openSettings();
-        } },
-        children: [icon(iconName, 14), document.createTextNode(label)],
-      }));
-    }
-    // 说明卡片
-    const isApp = this.s.env === "app";
-    const infoCard = h("div", {
-      style: {
-        marginTop: "8px", padding: "10px 12px", borderRadius: "10px",
-        background: isApp ? "var(--accent-subtle, rgba(217,119,87,.10))" : "var(--bg-input)",
-        border: isApp ? "1px solid var(--accent)" : "1px solid var(--border-1)",
-        font: "var(--t-xs)", color: "var(--fg-2)", lineHeight: "1.55", display: "flex", gap: "8px", alignItems: "flex-start",
-      },
-      children: [
-        icon(isApp ? "shield-check" : "info", 14, { color: isApp ? "var(--accent)" : "var(--fg-3)", flex: "none" } as any),
-        h("span", { text: isApp
-          ? "后台持续守护。登录后常驻，实时累计闲置并到点自动退出 —— 完整自动清理能力。"
-          : "仅唤起时检测。uTools 插件无法长期后台守护，只能在打开插件那一刻扫描并清理已超时的应用。"
-        }),
-      ],
-    });
-    return h("div", { children: [seg, infoCard] });
   }
 
   // 可编辑下拉 pill（设计稿 EditPill）：点击在其下方弹出选项菜单。
@@ -975,7 +973,7 @@ class TrayApp {
   }
 
   private targetsByIds(ids: string[]): AppRow[] {
-    return this.s.list.filter((a) => ids.includes(a.id));
+    return this.s.list.filter((a) => ids.includes(this.identityOf(a)) || ids.includes(a.id));
   }
 
   private appChip(app: AppRow): HTMLElement {
@@ -1001,11 +999,12 @@ class TrayApp {
 
   /** 切换单个应用的豁免状态，并给 toast 反馈。 */
   private toggleExempt(a: AppRow): void {
-    if (this.s.exempt.has(a.id)) {
-      this.s.exempt.delete(a.id);
+    const identity = this.identityOf(a);
+    if (this.s.exempt.has(identity)) {
+      this.s.exempt.delete(identity);
       this.toast(`已恢复自动清理 · ${a.name}`);
     } else {
-      this.s.exempt.add(a.id);
+      this.s.exempt.add(identity);
       this.toast(`已保留 · ${a.name} 不自动清理`);
     }
     this.saveExempt();
@@ -1015,8 +1014,8 @@ class TrayApp {
   /** 立即清理所有"将自动退出"区的应用。 */
   private async doCleanNow(targets: AppRow[]): Promise<void> {
     if (!targets.length) return;
-    await this.doKill(targets);
-    this.toast(`已清理 ${targets.length} 个闲置应用`);
+    const result = await this.doKill(targets);
+    if (result.succeeded > 0) this.toast(`已清理 ${result.succeeded} 个闲置应用`);
     this.renderCleanBody();
   }
 
@@ -1032,11 +1031,11 @@ class TrayApp {
 
     // 判断应用是否"待清理"（在阈值线上）
     const isClean = (a: AppRow): boolean =>
-      s.cleanOn && !s.exempt.has(a.id) && (a.idleMinutes ?? 0) >= s.threshold;
+      s.cleanOn && a.autoCleanEligible === true && !s.exempt.has(this.identityOf(a)) && (a.idleMinutes ?? 0) >= s.threshold;
 
     // 判断"临近过线"距离（保留区中未豁免且距离过线 ≤30 分的）
     const nearMin = (a: AppRow): number | null => {
-      if (!s.cleanOn || s.exempt.has(a.id) || isClean(a)) return null;
+      if (!s.cleanOn || !a.autoCleanEligible || s.exempt.has(this.identityOf(a)) || isClean(a)) return null;
       const remaining = s.threshold - (a.idleMinutes ?? 0);
       return (remaining > 0 && remaining <= 30) ? remaining : null;
     };
@@ -1153,13 +1152,14 @@ class TrayApp {
     const metricProcs = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", whiteSpace: "nowrap", flex: "none" } });
     const metricCpu = h("span", { style: { font: "var(--t-mono-sm)", whiteSpace: "nowrap", flex: "none" } });
     const metricMem = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", whiteSpace: "nowrap", flex: "none" } });
+    const metricDivider = h("span", { style: { width: "1px", height: "9px", background: "var(--border-2)", margin: "0 3px", flex: "none" } });
     const metricStatus = h("span", { style: { font: "var(--t-xs)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: "0" } });
 
     const metricRow = h("div", {
       style: { display: "flex", alignItems: "center", gap: "4px", marginTop: "1px", whiteSpace: "nowrap", overflow: "hidden", minWidth: "0" },
       children: [
         metricProcs, metricCpu, metricMem,
-        h("span", { style: { width: "1px", height: "9px", background: "var(--border-2)", margin: "0 3px", flex: "none" } }),
+        metricDivider,
         metricStatus,
       ],
     });
@@ -1178,7 +1178,7 @@ class TrayApp {
       children: [iconHolder, mid, rightHolder],
     });
 
-    const ref: CleanRowRefs = { row, iconHolder, nameEl, metricProcs, metricCpu, metricMem, metricStatus, rightHolder, signature: "" };
+    const ref: CleanRowRefs = { row, iconHolder, nameEl, metricProcs, metricCpu, metricMem, metricDivider, metricStatus, rightHolder, signature: "" };
     this.cleanRows.set(a.id, ref);
     return ref;
   }
@@ -1186,7 +1186,7 @@ class TrayApp {
   /** 更新 clean 视图应用行动态内容（每 tick 调用，有签名跳过机制）。 */
   private updateCleanRow(ref: CleanRowRefs, a: AppRow, isCleanZone: boolean, autoOn: boolean, near: number | null): void {
     const idle = a.idleMinutes ?? 0;
-    const exempt = this.s.exempt.has(a.id);
+    const exempt = this.s.exempt.has(this.identityOf(a));
 
     // 签名：包含所有影响渲染的动态字段
     const sig = [
@@ -1220,6 +1220,8 @@ class TrayApp {
     ref.metricStatus.textContent = statusText;
     ref.metricStatus.style.color = statusColor;
     ref.metricStatus.style.fontWeight = statusBold ? "600" : "400";
+    ref.metricDivider.style.display = autoOn ? "inline-block" : "none";
+    ref.metricStatus.style.display = autoOn ? "inline" : "none";
 
     // 左侧图标：FuseIcon（待清理且非豁免）或普通图标
     // FuseIcon 每 tick 重建（SVG 进度需要）；row 容器本身不重建
@@ -1267,7 +1269,7 @@ class TrayApp {
         style: { display: "flex", alignItems: "center", gap: "8px", padding: "10px 10px 6px" },
         children: [
           h("button", {
-            attrs: { title: "返回" },
+            attrs: { title: "返回　Esc" },
             style: { width: "28px", height: "28px", display: "grid", placeItems: "center", borderRadius: "7px", border: "none", background: "transparent", color: "var(--fg-2)", cursor: "pointer", flex: "none" },
             on: { click: () => this.closeClean() },
             children: [icon("arrow-left", 16)],
@@ -1296,6 +1298,12 @@ class TrayApp {
     const titleRow = h("div", {
       style: { display: "flex", alignItems: "center", gap: "8px", padding: "10px 12px 8px" },
       children: [
+        h("button", {
+          attrs: { title: "返回　Esc" },
+          style: { width: "28px", height: "28px", display: "grid", placeItems: "center", borderRadius: "7px", border: "none", background: "transparent", color: "var(--fg-2)", cursor: "pointer", flex: "none" },
+          on: { click: () => this.closeClean() },
+          children: [icon("arrow-left", 16)],
+        }),
         this.brandTile(20, 5),
         h("span", { style: { font: "var(--t-lg)", fontWeight: "700", color: "var(--fg-1)", flex: "1" }, text: "鹅的监控" }),
         h("span", { style: { font: "var(--t-xs)", color: "var(--fg-3)" }, text: `运行中 ${appCount} 个` }),
@@ -1332,7 +1340,7 @@ class TrayApp {
     const pct = Math.round(thr / 240 * 100);
 
     const rangeEl = h("input", {
-      attrs: { type: "range", min: "15", max: "240", step: "1", value: String(thr) },
+      attrs: { type: "range", min: "15", max: "240", step: "1", value: String(thr), "aria-label": "自动清理闲置阈值", "aria-valuetext": cFmtDur(thr) },
       className: "v2-range",
       style: { background: `linear-gradient(90deg, var(--accent) ${pct}%, var(--bg-track) ${pct}%)` },
       on: {
@@ -1524,9 +1532,12 @@ class TrayApp {
       text: "不自动清理",
     });
 
-    const btn = h("div", {
+    const btn = h("button", {
       attrs: {
+        type: "button",
         role: "checkbox",
+        "aria-label": `不自动清理 ${a.name}`,
+        "aria-checked": exempt ? "true" : "false",
         title: exempt ? "已设为不自动清理 · 点击取消" : "勾选后不自动清理（保留）",
       },
       style: {
@@ -1539,10 +1550,10 @@ class TrayApp {
       on: {
         click: (e: MouseEvent) => { e.stopPropagation(); this.toggleExempt(a); },
         mouseenter: (e: MouseEvent) => {
-          if (!this.s.exempt.has(a.id)) (e.currentTarget as HTMLElement).style.background = "var(--bg-elev)";
+          if (!this.s.exempt.has(this.identityOf(a))) (e.currentTarget as HTMLElement).style.background = "var(--bg-elev)";
         },
         mouseleave: (e: MouseEvent) => {
-          if (!this.s.exempt.has(a.id)) (e.currentTarget as HTMLElement).style.background = "transparent";
+          if (!this.s.exempt.has(this.identityOf(a))) (e.currentTarget as HTMLElement).style.background = "transparent";
         },
       },
       children: [checkBox, label],
@@ -1585,10 +1596,11 @@ class TrayApp {
       on: { click: () => this.closeTimer() },
       children: [icon("arrow-left", 17)],
     });
-    const seg = h("div", { style: { display: "flex", gap: "3px", padding: "3px", borderRadius: "11px", background: "var(--bg-input)", border: "1px solid var(--border-1)" } });
+    const seg = h("div", { attrs: { role: "tablist", "aria-label": "定时退出模式" }, style: { display: "flex", gap: "3px", padding: "3px", borderRadius: "11px", background: "var(--bg-input)", border: "1px solid var(--border-1)" } });
     for (const [id, label, iconName] of [["countdown", "倒计时", "timer"], ["schedule", "计划", "calendar"]] as const) {
       const on = tab === id;
       seg.appendChild(h("button", {
+        attrs: { role: "tab", "aria-selected": on ? "true" : "false" },
         style: { flex: "1", height: "34px", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "7px", borderRadius: "8px", border: "none", cursor: "pointer", font: "var(--t-base)", fontWeight: "700", background: on ? "var(--bg-row-sel)" : "transparent", color: on ? "var(--accent)" : "var(--fg-2)", boxShadow: on ? "inset 0 0 0 1px var(--accent)" : "none" },
         on: { click: () => this.openTimer(id) },
         children: [icon(iconName, 15), document.createTextNode(label)],
@@ -1615,7 +1627,10 @@ class TrayApp {
     const pct = setMode ? this.s.timerMinutes / 120 : Math.max(0, remaining / Math.max(1, this.s.timerTotalSec));
     const dash = 565 * (1 - Math.min(1, Math.max(0, pct)));
     const center = setMode ? `${this.s.timerMinutes}` : `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
-    const dial = h("div", { style: { position: "relative", width: "218px", height: "218px", margin: "10px auto 0", touchAction: "none", cursor: setMode ? "grab" : "default" } });
+    const dial = h("div", {
+      attrs: setMode ? { role: "slider", tabindex: "0", "aria-label": "倒计时时长", "aria-valuemin": "1", "aria-valuemax": "120", "aria-valuenow": String(this.s.timerMinutes), "aria-valuetext": `${this.s.timerMinutes} 分钟` } : {},
+      style: { position: "relative", width: "218px", height: "218px", margin: "10px auto 0", touchAction: "none", cursor: setMode ? "grab" : "default" },
+    });
     dial.innerHTML = `<svg viewBox="0 0 220 220" width="218" height="218" style="display:block"><circle cx="110" cy="110" r="90" fill="none" stroke="var(--bg-track)" stroke-width="14"/><circle cx="110" cy="110" r="90" fill="none" stroke="var(--accent)" stroke-width="14" stroke-linecap="round" stroke-dasharray="565" stroke-dashoffset="${dash}" transform="rotate(-90 110 110)"/></svg>`;
     dial.appendChild(h("div", { style: { position: "absolute", inset: "0", display: "grid", placeItems: "center", pointerEvents: "none", textAlign: "center" }, children: [
       h("div", { children: [
@@ -1624,28 +1639,37 @@ class TrayApp {
       ] }),
     ] }));
     if (setMode) {
+      const setMinutes = (minutes: number) => {
+        this.s.timerMinutes = Math.max(1, Math.min(120, minutes));
+        this.bridge.setPref("pk_tray_timer_minutes", String(this.s.timerMinutes));
+        this.renderTimerBody();
+      };
       const setFromEvent = (e: PointerEvent) => {
         const r = dial.getBoundingClientRect();
         const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
         let frac = Math.atan2(e.clientX - cx, -(e.clientY - cy)) / (2 * Math.PI);
         if (frac < 0) frac += 1;
-        const minutes = Math.max(1, Math.round(frac * 120));
-        this.s.timerMinutes = minutes;
-        this.bridge.setPref("pk_tray_timer_minutes", String(minutes));
-        this.renderTimerBody();
+        setMinutes(Math.max(1, Math.round(frac * 120)));
       };
       dial.addEventListener("pointerdown", (e) => { dial.setPointerCapture(e.pointerId); setFromEvent(e); });
       dial.addEventListener("pointermove", (e) => { if ((e.buttons & 1) === 1) setFromEvent(e); });
+      dial.addEventListener("keydown", (e) => {
+        const step = e.shiftKey ? 10 : 1;
+        if (e.key === "ArrowUp" || e.key === "ArrowRight") { e.preventDefault(); setMinutes(this.s.timerMinutes + step); }
+        if (e.key === "ArrowDown" || e.key === "ArrowLeft") { e.preventDefault(); setMinutes(this.s.timerMinutes - step); }
+        if (e.key === "Home") { e.preventDefault(); setMinutes(1); }
+        if (e.key === "End") { e.preventDefault(); setMinutes(120); }
+      });
     }
     const pane = h("div", { style: { flex: "1", display: "flex", flexDirection: "column", minHeight: "0", padding: "8px 18px 0", overflow: "hidden" }, children: [dial] });
     if (setMode) {
-      const presets = h("div", { style: { display: "flex", justifyContent: "center", gap: "8px", marginTop: "14px", flexWrap: "wrap" } });
-      for (const m of [15, 30, 45, 60]) presets.appendChild(h("button", { style: { height: "30px", padding: "0 13px", borderRadius: "999px", border: m === this.s.timerMinutes ? "1px solid var(--accent)" : "1px solid var(--border-2)", background: m === this.s.timerMinutes ? "var(--bg-row-sel)" : "transparent", color: m === this.s.timerMinutes ? "var(--accent)" : "var(--fg-2)", cursor: "pointer", font: "var(--t-sm)", fontWeight: "700" }, on: { click: () => { this.s.timerMinutes = m; this.bridge.setPref("pk_tray_timer_minutes", String(m)); this.renderTimerBody(); } }, text: `${m} 分` }));
+      const presets = h("div", { attrs: { role: "group", "aria-label": "常用倒计时时长" }, style: { display: "flex", justifyContent: "center", gap: "8px", marginTop: "14px", flexWrap: "wrap" } });
+      for (const m of [15, 30, 45, 60]) presets.appendChild(h("button", { attrs: { "aria-pressed": m === this.s.timerMinutes ? "true" : "false" }, style: { height: "30px", padding: "0 13px", borderRadius: "999px", border: m === this.s.timerMinutes ? "1px solid var(--accent)" : "1px solid var(--border-2)", background: m === this.s.timerMinutes ? "var(--bg-row-sel)" : "transparent", color: m === this.s.timerMinutes ? "var(--accent)" : "var(--fg-2)", cursor: "pointer", font: "var(--t-sm)", fontWeight: "700" }, on: { click: () => { this.s.timerMinutes = m; this.bridge.setPref("pk_tray_timer_minutes", String(m)); this.renderTimerBody(); } }, text: `${m} 分` }));
       pane.appendChild(presets);
       pane.appendChild(h("div", { className: "t-label", style: { marginTop: "18px", marginBottom: "8px" }, text: "到点退出这些应用" }));
       pane.appendChild(targets.length ? h("div", { style: { display: "flex", flexWrap: "wrap", gap: "8px" }, children: targets.map((a) => this.appChip(a)) }) : h("div", { style: { color: "var(--fg-3)", font: "var(--t-sm)", padding: "8px 0" }, text: "先在列表里勾选要定时退出的应用" }));
       pane.appendChild(h("div", { style: { flex: "1" } }));
-      pane.appendChild(h("button", { style: { height: "44px", marginBottom: "14px", borderRadius: "12px", border: "none", background: targets.length ? "var(--accent)" : "var(--bg-elev)", color: targets.length ? "var(--fg-on-accent)" : "var(--fg-3)", cursor: targets.length ? "pointer" : "default", font: "var(--t-base)", fontSize: "14px", fontWeight: "800", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "9px" }, on: { click: () => this.startCountdown() }, children: [icon("play", 16), document.createTextNode(targets.length ? `${this.s.timerMinutes} 分钟后退出` : "请选择应用")] }));
+      pane.appendChild(h("button", { style: { height: "44px", marginBottom: "14px", borderRadius: "12px", border: "none", background: targets.length ? "var(--accent)" : "var(--bg-elev)", color: targets.length ? "var(--fg-on-accent)" : "var(--fg-2)", cursor: "pointer", font: "var(--t-base)", fontSize: "14px", fontWeight: "800", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "9px" }, on: { click: () => targets.length ? this.startCountdown() : this.closeTimer() }, children: [icon(targets.length ? "play" : "arrow-left", 16), document.createTextNode(targets.length ? `${this.s.timerMinutes} 分钟后退出` : "返回列表选择应用")] }));
     } else if (mode === "due") {
       pane.appendChild(h("div", { style: { textAlign: "center", color: "var(--fg-2)", font: "var(--t-sm)", marginTop: "10px" }, text: `时间到，准备退出 ${targets.length} 个应用` }));
       pane.appendChild(h("div", { style: { display: "flex", gap: "10px", marginTop: "auto", marginBottom: "16px" }, children: [
@@ -1705,18 +1729,19 @@ class TrayApp {
 
   private ruleCard(rule: ScheduleRule): HTMLElement {
     const targets = this.ruleTargets(rule);
+    const repeatLabel = rule.repeat === "workday" ? "每个工作日" : "每天";
     return h("div", { style: { display: "flex", alignItems: "center", gap: "12px", padding: "11px 12px", borderRadius: "13px", background: "var(--bg-elev)", border: "1px solid var(--border-1)", opacity: rule.on ? "1" : "0.62" }, children: [
       h("div", { style: { minWidth: "48px", textAlign: "center", color: "var(--fg-1)", font: "600 18px/1 var(--font-mono)", fontVariantNumeric: "tabular-nums" }, text: rule.time }),
       h("div", { style: { width: "1px", alignSelf: "stretch", background: "var(--border-1)" } }),
       h("div", { style: { flex: "1", minWidth: "0" }, children: [
-        h("div", { style: { display: "inline-flex", alignItems: "center", gap: "5px", color: "var(--fg-3)", font: "var(--t-xs)", marginBottom: "6px" }, children: [icon(rule.repeat === "workday" ? "briefcase" : "repeat", 12), document.createTextNode(rule.repeat === "workday" ? "每个工作日" : "每天")] }),
+        h("div", { style: { display: "inline-flex", alignItems: "center", gap: "5px", color: "var(--fg-3)", font: "var(--t-xs)", marginBottom: "6px" }, children: [icon(rule.repeat === "workday" ? "briefcase" : "repeat", 12), document.createTextNode(repeatLabel)] }),
         h("div", { style: { color: "var(--fg-2)", font: "var(--t-sm)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }, text: targets.map((a) => a.name.replace("Google ", "")).join("、") || "当前所选应用" }),
       ] }),
-      this.switch(rule.on, (on) => {
+      this.switch(`${rule.time} ${repeatLabel}`, rule.on, (on) => {
         if (on && !rule.appIds.length) {
           const targets = this.selectedTargets();
           if (!targets.length) { this.toast("先勾选应用再启用计划"); this.renderTimerBody(); return; }
-          rule.appIds = targets.map((a) => a.id);
+          rule.appIds = targets.map((a) => this.identityOf(a));
         }
         rule.on = on;
         this.saveScheduleRules();
@@ -1736,7 +1761,7 @@ class TrayApp {
     const now = new Date();
     now.setMinutes(now.getMinutes() + 30);
     const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-    this.s.scheduleRules.push({ id: `rule-${Date.now()}`, time, repeat: "daily", appIds: targets.map((a) => a.id), on: true });
+    this.s.scheduleRules.push({ id: `rule-${Date.now()}`, time, repeat: "daily", appIds: targets.map((a) => this.identityOf(a)), on: true });
     this.saveScheduleRules();
     this.armScheduleTimers();
     this.renderTimerBody();
@@ -1746,7 +1771,7 @@ class TrayApp {
     const targets = this.selectedTargets();
     if (!targets.length) { this.toast("先勾选要定时退出的应用"); return; }
     const seconds = this.s.timerMinutes * 60;
-    this.s.timerTargetIds = targets.map((a) => a.id);
+    this.s.timerTargetIds = targets.map((a) => this.identityOf(a));
     this.s.timerTotalSec = seconds;
     this.s.timerRemainSec = seconds;
     this.s.timerMode = "running";
@@ -1757,12 +1782,14 @@ class TrayApp {
   private ensureCountdownTick(): void {
     if (this.countdownTimer != null) window.clearInterval(this.countdownTimer);
     if (this.s.timerMode !== "running") return;
+    this.countdownDeadline = Date.now() + this.s.timerRemainSec * 1000;
     this.countdownTimer = window.setInterval(() => {
       if (this.s.timerMode !== "running") return;
-      this.s.timerRemainSec = Math.max(0, this.s.timerRemainSec - 1);
+      this.s.timerRemainSec = Math.max(0, Math.ceil(((this.countdownDeadline ?? Date.now()) - Date.now()) / 1000));
       if (this.s.timerRemainSec <= 0) {
         if (this.countdownTimer != null) window.clearInterval(this.countdownTimer);
         this.countdownTimer = null;
+        this.countdownDeadline = null;
         this.s.timerMode = "due";
         void this.finishCountdownKill();
       }
@@ -1781,6 +1808,7 @@ class TrayApp {
   private cancelCountdown(): void {
     if (this.countdownTimer != null) window.clearInterval(this.countdownTimer);
     this.countdownTimer = null;
+    this.countdownDeadline = null;
     this.s.timerMode = "set";
     this.s.timerTargetIds = [];
     this.s.timerRemainSec = this.s.timerMinutes * 60;
@@ -1809,6 +1837,9 @@ class TrayApp {
       const at = new Date(now);
       at.setHours(hh, mm, 0, 0);
       if (at <= now) at.setDate(at.getDate() + 1);
+      if (rule.repeat === "workday") {
+        while (at.getDay() === 0 || at.getDay() === 6) at.setDate(at.getDate() + 1);
+      }
       if (!next || at < next.at) next = { rule, at };
     }
     if (!next) return;
@@ -1821,10 +1852,10 @@ class TrayApp {
   }
 
   // 开关
-  private switch(on: boolean, onToggle: (on: boolean) => void): HTMLElement {
+  private switch(label: string, on: boolean, onToggle: (on: boolean) => void): HTMLElement {
     const knob = h("span", { style: { width: "16px", height: "16px", borderRadius: "999px", background: "var(--fg-on-accent)", boxShadow: "0 1px 2px rgba(0,0,0,0.3)" } });
-    const sw = h("span", {
-      attrs: { role: "switch" },
+    const sw = h("button", {
+      attrs: { role: "switch", type: "button", "aria-label": label, "aria-checked": on ? "true" : "false" },
       style: {
         width: "38px", height: "22px", flex: "none", borderRadius: "999px", padding: "2px", display: "flex",
         transition: "background .15s", cursor: "pointer",
@@ -1839,6 +1870,7 @@ class TrayApp {
         background: state ? "var(--accent)" : "var(--bg-track)",
         border: state ? "1px solid var(--accent)" : "1px solid var(--border-strong)",
       } as Partial<CSSStyleDeclaration>);
+      sw.setAttribute("aria-checked", state ? "true" : "false");
     };
     render();
     return sw;
@@ -1903,6 +1935,7 @@ class TrayApp {
     const v = this.visible;
     if (this.s.cursor >= v.length) this.s.cursor = Math.max(0, v.length - 1);
     if (this.s.loading && v.length === 0) { this.showEmpty("正在读取应用…"); return; }
+    if (this.s.loadError && v.length === 0) { this.showEmpty(this.s.loadError); return; }
     if (v.length === 0) { this.showEmpty(this.s.query ? "没有匹配的应用" : "没有界面应用"); return; }
     this.emptyEl.style.display = "none";
 
@@ -1938,8 +1971,9 @@ class TrayApp {
       style: { flex: "1", minWidth: "0", font: "var(--t-row)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
     });
     const cpu = h("span", { style: { font: "var(--t-mono-sm)", minWidth: "42px", textAlign: "right" } });
-    const row = h("div", {
-      style: { display: "flex", alignItems: "center", gap: "11px", height: "38px", padding: "0 12px", borderRadius: "9px", cursor: "pointer" },
+    const row = h("button", {
+      attrs: { type: "button", role: "option", "aria-selected": "false" },
+      style: { display: "flex", alignItems: "center", gap: "11px", width: "100%", height: "38px", padding: "0 12px", borderRadius: "9px", border: "none", background: "transparent", color: "inherit", textAlign: "left", cursor: "pointer" },
       on: {
         // 点击行：勾选 + 把 cursor 落在此行。
         click: () => { this.setCursorById(a.id); this.toggleSelect(a.id); },
@@ -1961,6 +1995,7 @@ class TrayApp {
     // 勾选态填底；cursor 行加 1px 焦点框（设计稿 inset 0 0 0 1px border-2）。
     ref.row.style.background = checked ? "var(--bg-row-sel)" : "transparent";
     ref.row.style.boxShadow = isCursor ? "inset 0 0 0 1px var(--border-2)" : "none";
+    ref.row.setAttribute("aria-selected", checked ? "true" : "false");
 
     // 勾选框
     Object.assign(ref.check.style, {
@@ -2002,6 +2037,18 @@ class TrayApp {
           (buttons[buttons.length - 1] as HTMLButtonElement | undefined)?.click();
           return;
         }
+        if (e.key === "Tab") {
+          const focusable = Array.from(this.confirmLayer.querySelectorAll<HTMLElement>("button"));
+          if (focusable.length) {
+            e.preventDefault();
+            const current = focusable.indexOf(document.activeElement as HTMLElement);
+            const next = e.shiftKey
+              ? (current <= 0 ? focusable.length - 1 : current - 1)
+              : (current + 1) % focusable.length;
+            focusable[next].focus();
+          }
+        }
+        return;
       }
 
       // ⌘, 偏好设置（任意视图可切换）
@@ -2012,7 +2059,7 @@ class TrayApp {
       }
 
       if (this.s.view === "settings") {
-        if (e.key === "Escape" || e.key === "Enter") { e.preventDefault(); this.closeSettings(); }
+        if (e.key === "Escape") { e.preventDefault(); this.closeSettings(); }
         return;
       }
 

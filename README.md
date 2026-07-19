@@ -23,11 +23,14 @@
 
 ### Tauri 模式 · 菜单栏（状态栏）popover
 
-macOS 状态栏图标下挂的 360px popover（无边框 / 透明 / 置顶 / 失焦自动收起），三种状态：
+状态栏图标下挂的 326px popover（无边框 / 透明 / 置顶 / 失焦自动收起），包含以下视图：
 
-- **默认弹层**：多选勾选 + 红色「结束所选 · N」批量结束 + 每行单独结束（电源键）+ 搜索框 + 底部「无操作自动收起」计时条。
-- **偏好设置**：*无操作自动收起* 分段控件（关闭 / 10s / 30s / 60s）、*自动清理*（空闲 > 30 分钟且 CPU < 1%）、结束前二次确认、开机自启。
-- **无操作倒计时**：列表变暗 + 环形「N 秒后自动收起 · 移动鼠标取消」+「保持打开」；倒计时结束调 `tray_collapse` 隐藏窗口。
+- **应用列表**：搜索、键盘/鼠标多选、批量结束和明确的失败反馈。
+- **清理线**：按闲置时长展示候选应用，默认关闭；只有用户明确开启后才会自动执行，豁免按稳定应用身份持久化。
+- **定时退出**：一次性倒计时和每日/工作日计划；倒计时按真实截止时间计算，系统睡眠后不会漂移。
+- **偏好设置**：主题、结束前二次确认和开机自启。
+
+自动清理只接受后端保守标记的真实 GUI 应用。目前 macOS 支持 `/Applications` 与用户 `Applications` 下的 `.app`；Windows/Linux 因缺少可靠窗口身份判断，不会后台自动结束宽泛路径下的进程。手动结束仍可在主窗口和应用列表中使用。
 
 偏好用 `bridge.setPref` 持久化（`pk_tray_*`）；开机自启走 `tauri-plugin-autostart`（命令 `set_autostart`）。
 
@@ -41,7 +44,7 @@ packages/core/          共享前端（原生 TS，零框架运行时依赖）
   tray.html             菜单栏 popover 窗口入口（Tauri 用 ?popover=1 加载）
   src/
     main.ts             主应用：渲染 + 键盘 + 轮询刷新 + uTools 接管钩子
-    tray.ts             菜单栏 popover：默认弹层 / 偏好设置 / 无操作倒计时三态
+    tray.ts             菜单栏 popover：应用列表 / 清理线 / 定时退出 / 偏好设置
     atoms.ts            UI 原子：AppIcon / Meter / Kbd / highlight
     shared.ts           分类/格式化/合并辅助（纯逻辑）
     icons.ts            内联 Lucide SVG
@@ -59,7 +62,7 @@ src-tauri/              Tauri 后端（Rust）
   src/
     process.rs          sysinfo 枚举 + Helper 合并 + 系统资源
     kill.rs             kill_tree 杀进程树
-    icon.rs             图标抓取（预留接口）
+    icon.rs             三平台应用图标抓取与缓存
     lib.rs              Tauri 命令 + 常驻 System 后台刷新线程 + 菜单栏 tray 图标/popover/自启
 
 utools/                 uTools 适配
@@ -94,8 +97,8 @@ Tauri 原生包依赖各自 OS 的打包工具链，**无法跨 OS 交叉编译*
 
 ```bash
 bun run build:mac           # 在 macOS 上 → .app / .dmg
-bun run build:win           # 在 Windows 上 → .msi / .exe (NSIS)
-bun run build:linux         # 在 Linux  上 → .AppImage / .deb / .rpm
+bun run build:win           # 在 Windows 上 → .exe (NSIS)
+bun run build:linux         # 在 Linux  上 → .AppImage / .deb
 ```
 
 发布全平台包：在 GitHub Actions 用 macOS / windows / linux 三个 runner 分别跑对应命令，再汇总产物（本地单机只能产出当前系统的包）。
@@ -107,10 +110,20 @@ bun run build:linux         # 在 Linux  上 → .AppImage / .deb / .rpm
 | 进程枚举 | sysinfo | `ps`(mac/Linux) / PowerShell(Win) |
 | CPU% | sysinfo 连续采样（准确） | `ps %cpu` / 负载估算 |
 | 杀进程树 | kill_tree（Win 用 Win32 API） | `pkill -P` + SIGKILL / `taskkill /T /F` |
-| 图标 | sips(mac) / PowerShell+System.Drawing(Win) / hicolor 主题(Linux) | 可用 Electron nativeImage |
+| 图标 | sips(mac) / PowerShell+System.Drawing(Win) / hicolor 主题(Linux) | sips(mac)，其余平台字形降级 |
 | 偏好持久化 | localStorage | `utools.dbStorage` |
 | 菜单栏 popover | tray-icon + 隐藏 tray 窗口 | —（uTools 用工具栈接入替代） |
 | 工具栈 / 全局搜索 | —（独立窗口） | `onPluginEnter` + `setSubInput` 接管 |
 | 开机自启 | `tauri-plugin-autostart` | uTools 宿主管理 |
 
 uTools preload 运行在 Node 16 CommonJS，源码保持可读（uTools 审核要求，不混淆）。
+
+## 安全与发布约束
+
+- 自动清理默认关闭，必须由用户明确开启；系统/后台进程和未被后端标记为可自动清理的应用始终排除。
+- 应用豁免与计划任务保存稳定身份，不保存瞬时 PID。
+- 结束请求会在后端用最新进程快照复核分组与 PID，并保护鹅的监控自身及祖先进程，避免 PID 复用或过期列表导致误杀。
+- uTools 构建会强制检查 Chromium 108 不支持的现代颜色语法，并验证插件 logo 不超过 256×256。
+- `bun run check` 会校验版本一致性、前端逻辑测试和 uTools 构建；Rust 端由三平台 CI 执行格式、测试和 Clippy。
+- 当前安装包通过 GitHub Release 直接分发，未配置 Apple Developer ID 公证或 Windows 代码签名时，系统可能显示来源/信誉警告；正式对外发布前需在仓库 Secrets 中接入签名凭据。
+- `macOSPrivateApi` 用于透明菜单栏窗口，因此当前构建面向 GitHub/直接分发，不走 Mac App Store。
