@@ -165,7 +165,7 @@ fn monogram_for(name: &str) -> String {
     if words.len() >= 2 {
         let a = words[0].chars().next().unwrap_or('?');
         let b = words[1].chars().next().unwrap_or('?');
-        return format!("{}{}", a, b).to_uppercase();
+        return format!("{a}{b}").to_uppercase();
     }
     let w = words.first().copied().unwrap_or(cleaned);
     let chars: Vec<char> = w.chars().collect();
