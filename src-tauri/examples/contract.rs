@@ -93,8 +93,8 @@ fn main() {
         "AppRow 示例 JSON keys: {:?}",
         row_json.as_object().unwrap().keys().collect::<Vec<_>>()
     );
-    println!("SystemStats JSON: {}", stats_json);
-    println!("KillResult JSON: {}", kill_json);
+    println!("SystemStats JSON: {stats_json}");
+    println!("KillResult JSON: {kill_json}");
     println!(
         "{}",
         if ok {
