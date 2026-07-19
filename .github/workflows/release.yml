@@ -64,7 +64,7 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Linux 构建依赖（Tauri 2 需 webkit2gtk-4.1 / rsvg / AppIndicator）。
       - name: Install Linux dependencies
@@ -119,7 +119,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - name: Build and verify uTools plugin
