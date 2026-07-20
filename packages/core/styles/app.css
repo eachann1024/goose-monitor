@@ -63,6 +63,11 @@ body.boxed .win {
 
 button { font-family: inherit; }
 input { font-family: inherit; }
+button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+input::placeholder { color: var(--fg-3); opacity: 1; }
 
 /* Helper 子进程行背景 —— 深主题压暗，浅主题轻微加灰，避免硬编码 rgba(0,0,0) 在浅色下突兀 */
 [data-theme="dark"] { --bg-helper-row: rgba(0,0,0,0.16); }
@@ -73,7 +78,7 @@ input { font-family: inherit; }
 @keyframes pkFade { from { opacity: 0; } to { opacity: 1; } }
 
 /* meter 宽度动画 */
-.meter-fill { transition: width 200ms ease-out; }
+.meter-fill { transition: none; }
 
 /* 确认弹窗动画 */
 .scrim { animation: scrimIn 140ms ease-out; }
@@ -119,7 +124,7 @@ input { font-family: inherit; }
   font-weight: 600;
   color: var(--danger-fg);
   background: var(--danger-bg);
-  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  border: 1px solid var(--danger-border);
   white-space: nowrap;
 }
 
@@ -136,7 +141,7 @@ input { font-family: inherit; }
   flex: none;
   color: var(--danger-fg);
   background: var(--danger-bg);
-  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  border: 1px solid var(--danger-border);
   cursor: default;
   opacity: 0.55;
   transition: opacity 120ms ease, background 120ms ease;
@@ -146,5 +151,14 @@ input { font-family: inherit; }
   opacity: 1;
 }
 .pk-footer-close.pk-footer-close--on:hover {
-  background: color-mix(in srgb, var(--danger-bg) 70%, var(--danger) 30%);
+  background: var(--danger-hover);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }

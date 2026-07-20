@@ -9,7 +9,7 @@ declare global {
     services?: {
       listProcesses(category: string): Promise<AppRow[]>;
       systemStats(): Promise<SystemStats>;
-      killProcess(pid: number, pids: number[]): Promise<KillResult>;
+      killProcess(id: string, snapshotToken: string, pids: number[]): Promise<KillResult>;
     };
     utools?: { isDarkColors?: () => boolean; dbStorage?: { getItem(k: string): unknown; setItem(k: string, v: string): void } };
   }
@@ -28,7 +28,7 @@ export class UtoolsBridge implements PlatformBridge {
 
   async killProcess(row: AppRow): Promise<KillResult> {
     const pids = row.allPids && row.allPids.length ? row.allPids : [row.pid];
-    return (await window.services!.killProcess(row.pid, pids)) as KillResult;
+    return (await window.services!.killProcess(row.id, row.snapshotToken, pids)) as KillResult;
   }
 
   getPref(key: string): string | null {

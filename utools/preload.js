@@ -201,30 +201,30 @@ async function rawProcsUnix() {
   //   name 用 comm（稳定短名），exe 用 args 整串（含路径，路径带空格也不丢，
   //   因为 appBundle/is_gui 都是子串匹配，不依赖精确切分）。
   if (IS_MAC) {
-    const out = await shAsync("ps", ["-axwwo", "pid=,ppid=,pcpu=,rss=,comm="], 32 * 1024 * 1024);
+    const out = await shAsync("ps", ["-axwwo", "pid=,ppid=,pcpu=,rss=,lstart=,comm="], 32 * 1024 * 1024);
     const list = [];
     for (const line of out.split("\n")) {
-      const m = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(.*)$/);
+      const m = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.*)$/);
       if (!m) continue;
-      const exe = m[5].trim();
+      const exe = m[6].trim();
       list.push({
         pid: +m[1], ppid: +m[2], cpu: parseFloat(m[3]) || 0,
-        memMb: (+m[4]) / 1024, exe, name: path.basename(exe) || exe,
+        memMb: (+m[4]) / 1024, startedAt: m[5], exe, name: path.basename(exe) || exe,
       });
     }
     return list;
   }
   // Linux：comm 在前（无空格短名），args 在后（含路径的完整命令行）
-  const out = await shAsync("ps", ["-axwwo", "pid=,ppid=,pcpu=,rss=,comm=,args="], 32 * 1024 * 1024);
+  const out = await shAsync("ps", ["-axwwo", "pid=,ppid=,pcpu=,rss=,lstart=,comm=,args="], 32 * 1024 * 1024);
   const list = [];
   for (const line of out.split("\n")) {
-    const m = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+)\s+(.*)$/);
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(\S+)\s+(.*)$/);
     if (!m) continue;
-    const name = m[5].trim();           // comm，稳定短名
-    const exe = (m[6] || "").trim() || name; // args 整串，保留路径（含空格）
+    const name = m[6].trim();           // comm，稳定短名
+    const exe = (m[7] || "").trim() || name; // args 整串，保留路径（含空格）
     list.push({
       pid: +m[1], ppid: +m[2], cpu: parseFloat(m[3]) || 0,
-      memMb: (+m[4]) / 1024, exe, name,
+      memMb: (+m[4]) / 1024, startedAt: m[5], exe, name,
     });
   }
   return list;
@@ -248,7 +248,7 @@ async function rawProcsWin() {
     "Get-CimInstance Win32_PerfFormattedData_PerfProc_Process | Where-Object { $_.IDProcess -gt 0 } | ForEach-Object { $perf[[int]$_.IDProcess] = [double]$_.PercentProcessorTime };",
     "Get-CimInstance Win32_Process | ForEach-Object {",
     "  $c = $perf[[int]$_.ProcessId]; if (-not $c) { $c = 0 }",
-    "  [pscustomobject]@{ pid=$_.ProcessId; ppid=$_.ParentProcessId; mem=$_.WorkingSetSize; exe=$_.ExecutablePath; name=$_.Name; cpu=[math]::Round($c / $cores, 1) }",
+    "  [pscustomobject]@{ pid=$_.ProcessId; ppid=$_.ParentProcessId; startedAt=$_.CreationDate; mem=$_.WorkingSetSize; exe=$_.ExecutablePath; name=$_.Name; cpu=[math]::Round($c / $cores, 1) }",
     "} | ConvertTo-Json -Compress",
   ].join(" ");
   const out = await shAsync("powershell", ["-NoProfile", "-Command", ps], 64 * 1024 * 1024);
@@ -256,6 +256,7 @@ async function rawProcsWin() {
   if (!Array.isArray(arr)) arr = [arr];
   return arr.map((p) => ({
     pid: p.pid, ppid: p.ppid || 0, cpu: p.cpu || 0,
+    startedAt: String(p.startedAt || ""),
     memMb: (p.mem || 0) / 1024 / 1024,
     exe: p.exe || "", name: p.name || "",
   }));
@@ -265,24 +266,53 @@ async function rawProcs() {
     return IS_WIN ? await rawProcsWin() : await rawProcsUnix();
   } catch (e) {
     console.error("[ProcKill] rawProcs failed", e);
-    return [];
+    throw e;
   }
 }
 
 /* ---- 合并 ---- */
 function merge(raw) {
   const groups = new Map();
+  const byPid = new Map(raw.map((p) => [p.pid, p]));
   for (const p of raw) {
     const ab = appBundle(p.exe);
     // gui：分组键命中 app bundle 即视为界面进程候选（与后端 collect_raw 一致，
     // 系统目录下 .app 的最终排除交由 listByCategory 的 isGui 把关）；否则按 exe 路径判定。
-    let key, display, bundle, gui;
-    if (ab) { key = "app:" + ab.bundle; display = ab.name; bundle = ab.bundle; gui = true; }
-    else if (p.exe) { key = "exe:" + p.exe; display = p.name; bundle = p.exe; gui = isGui(p.exe); }
-    else { key = "name:" + p.name; display = p.name; bundle = ""; gui = false; }
+    let key, identity, display, bundle, gui;
+    if (ab) {
+      identity = "app:" + ab.bundle;
+      key = identity;
+      display = ab.name;
+      bundle = ab.bundle;
+      gui = true;
+    } else if (p.exe) {
+      // 非 bundle 程序只归并同一 exe 的同一棵进程树，避免把两个独立的
+      // node/python 实例或同目录的不同程序一起结束。
+      let root = p;
+      let parentPid = p.ppid;
+      const seen = new Set();
+      while (parentPid > 1 && !seen.has(parentPid)) {
+        seen.add(parentPid);
+        const parent = byPid.get(parentPid);
+        if (!parent || parent.exe !== p.exe) break;
+        root = parent;
+        parentPid = parent.ppid;
+      }
+      identity = "exe:" + p.exe;
+      key = identity + "#" + root.pid;
+      display = p.name;
+      bundle = p.exe;
+      gui = isGui(p.exe);
+    } else {
+      identity = "name:" + p.name;
+      key = identity + "#" + p.pid;
+      display = p.name;
+      bundle = "";
+      gui = false;
+    }
     // 后端口径：is_sys = is_system_path && !gui（住在系统目录但属界面应用的不算系统进程）
     const sys = isSystemPath(p.exe, p.name) && !gui;
-    if (!groups.has(key)) groups.set(key, { display, bundle, members: [], sys });
+    if (!groups.has(key)) groups.set(key, { key, identity, display, bundle, members: [], sys });
     groups.get(key).members.push(p);
   }
   const rows = [];
@@ -299,13 +329,18 @@ function merge(raw) {
           cpu: Math.round(m.cpu * 10) / 10, mem: m.memMb, pid: m.pid,
         }))
       : [];
+    const snapshotToken = simpleHash(g.members
+      .map((p) => `${p.pid}:${p.startedAt || "unknown"}`)
+      .sort()
+      .join(","));
     rows.push({
-      id: "g" + main.pid, name: g.display,
+      id: "g" + simpleHash(g.key), identity: g.identity, name: g.display,
+      snapshotToken,
       monogram: monogramFor(g.display), color: colorFor(g.display),
       procs: g.members.length,
       cpu: Math.round(totalCpu * 10) / 10, mem: totalMem,
       pid: main.pid, path: g.bundle || main.exe,
-      helpers, sys: g.sys || undefined, allPids,
+      helpers, sys: g.sys || undefined, allPids, autoCleanEligible: false,
     });
   }
   return rows;
@@ -427,26 +462,52 @@ function descendantsUnix(rootPids) {
   return [...result];
 }
 
-function killProcess(pid, pids) {
+async function killProcess(id, snapshotToken, pids) {
   const SELF = process.pid;
-  let targets = (pids && pids.length) ? pids : [pid];
-  // 防自杀 + 保护关键系统进程（PID 0/1）
-  targets = targets.filter((p) => p !== SELF && p > 1);
+  const raw = await rawProcs();
+  const current = merge(raw).find((row) => row.id === id && row.snapshotToken === snapshotToken);
+  const expected = new Set(Array.isArray(pids) ? pids : []);
+
+  // 保护 uTools/Codex 宿主链：结束任一祖先都可能连带关闭当前插件。
+  const byPid = new Map(raw.map((p) => [p.pid, p]));
+  const protectedPids = new Set([SELF, 0, 1]);
+  let ancestor = byPid.get(SELF)?.ppid;
+  while (ancestor && !protectedPids.has(ancestor)) {
+    protectedPids.add(ancestor);
+    ancestor = byPid.get(ancestor)?.ppid;
+  }
+
+  // 只接受仍属于同一分组、且用户确认时就存在的 PID。PID 已复用到别组会被拒绝。
+  let targets = current
+    ? current.allPids.filter((p) => expected.has(p) && !protectedPids.has(p))
+    : [];
   if (!targets.length) {
-    return { ok: false, killed: [], error: "目标为空（已排除自身或受保护的系统进程）" };
+    return { ok: false, killed: [], error: "目标已变化、已退出或属于受保护进程，请刷新后重试" };
   }
 
   const killed = [];
-  let lastErr = null;
+  const errors = [];
 
   if (IS_WIN) {
-    for (const p of targets) {
+    // taskkill /T 会递归处理子进程，因此只提交组内没有目标祖先的根，避免重复终止被误报失败。
+    const targetSet = new Set(targets);
+    const roots = targets.filter((pid) => {
+      let parent = byPid.get(pid)?.ppid;
+      const seen = new Set();
+      while (parent && !seen.has(parent)) {
+        if (targetSet.has(parent)) return false;
+        seen.add(parent);
+        parent = byPid.get(parent)?.ppid;
+      }
+      return true;
+    });
+    for (const p of roots) {
       try {
         // taskkill /T 递归杀进程树
         execFileSync("taskkill", ["/T", "/F", "/PID", String(p)], { stdio: "ignore" });
         killed.push(p);
       } catch (e) {
-        lastErr = String((e && e.message) || e);
+        errors.push(`PID ${p}: ${String((e && e.message) || e)}`);
       }
     }
   } else {
@@ -461,19 +522,20 @@ function killProcess(pid, pids) {
       } catch (e) {
         // ESRCH（已退出）也算目标不在
         if (e && e.code === "ESRCH") killed.push(p);
-        else lastErr = String((e && e.message) || e);
+        else errors.push(`PID ${p}: ${String((e && e.message) || e)}`);
       }
     }
   }
 
-  if (!killed.length) return { ok: false, killed, error: lastErr || "没有进程被结束（可能权限不足）" };
+  if (errors.length) return { ok: false, killed, error: errors.join("；") };
+  if (!killed.length) return { ok: false, killed, error: "没有进程被结束（目标可能已变化）" };
   return { ok: true, killed };
 }
 
 window.services = {
   listProcesses: (category) => Promise.resolve(listByCategory(category)),
   systemStats: () => Promise.resolve(systemStats()),
-  killProcess: (pid, pids) => Promise.resolve(killProcess(pid, pids)),
+  killProcess: (id, snapshotToken, pids) => killProcess(id, snapshotToken, pids),
 };
 
 /* ============================================================

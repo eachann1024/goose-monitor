@@ -3,7 +3,7 @@
   "pluginName": "鹅的监控 进程管理器",
   "description": "键盘优先的跨平台进程管理器。自动归并 Chrome、VS Code 等应用的子进程，汇总真实资源占用；↑↓浏览，/ 搜索，⏎ 结束，⌘1–6 切分类，比活动监视器更快、更懂你。",
   "author": "鹅的监控",
-  "homepage": "https://github.com/",
+  "homepage": "https://github.com/eachann1024/goose-monitor",
   "version": "0.1.0",
   "logo": "logo.png",
   "main": "index.html",

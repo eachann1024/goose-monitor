@@ -13,6 +13,10 @@ export interface Helper {
 /** 一行 = 一个应用 / 进程组（已合并 Helper）。 */
 export interface AppRow {
   id: string;
+  /** 跨刷新/重启稳定的应用身份，用于持久化豁免和计划任务。 */
+  identity: string;
+  /** 当前进程组快照；后端在终止前重验，防止 PID 复用或成员变化。 */
+  snapshotToken: string;
   /** 显示名（应用名或进程名）。 */
   name: string;
   /** 字母字形（图标占位用，1-2 字符）。 */
@@ -41,6 +45,8 @@ export interface AppRow {
   allPids?: number[];
   /** 连续低占用（CPU<1%）累计分钟数，供菜单栏「自动清理」判断空闲时长。 */
   idleMinutes?: number;
+  /** 后端保守判定为可参与自动清理的真实 GUI 应用。 */
+  autoCleanEligible?: boolean;
 }
 
 export type CategoryId = "gui" | "all" | "cpu" | "mem" | "net" | "bg";

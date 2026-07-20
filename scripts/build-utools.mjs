@@ -1,8 +1,7 @@
 /* 把 vite 构建产物 dist/ 组装成 uTools 插件目录 utools-dist/。
    产物结构：index.html + assets/ + preload.js + plugin.json + logo.png
-   用法：npm run utools:build （会先 vite build --mode utools） */
-import { cpSync, mkdirSync, rmSync, existsSync, copyFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+   用法：bun run build:utools（会先 vite build --mode utools） */
+import { cpSync, mkdirSync, rmSync, existsSync, copyFileSync, writeFileSync, readdirSync, unlinkSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -11,6 +10,7 @@ const root = resolve(__dirname, "..");
 const dist = resolve(root, "dist");
 const out = resolve(root, "utools-dist");
 const utoolsDir = resolve(root, "utools");
+const packageJson = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
 
 // GOOSE_DEBUG=1：保留 .map，方便在 uTools 开发者工具里调试未压缩源码。
 // 正式发布（未设置）：剥离 .map，保持离线包整洁、不外泄源码映射。
@@ -19,6 +19,16 @@ const isDebug = process.env.GOOSE_DEBUG === "1";
 if (!existsSync(dist)) {
   console.error("✗ dist/ 不存在，请先运行 vite build --mode utools");
   process.exit(1);
+}
+
+// Chromium 108 兼容红线：构建产物不得包含 uTools 7.8 无法解析的现代颜色语法。
+const forbiddenColorSyntax = /color-mix\(|oklch\(|(?:^|[^a-z])lab\(|(?:^|[^a-z])lch\(/i;
+for (const file of readdirSync(resolve(dist, "assets"))) {
+  if (!file.endsWith(".css")) continue;
+  const css = readFileSync(resolve(dist, "assets", file), "utf8");
+  if (forbiddenColorSyntax.test(css)) {
+    throw new Error(`uTools Chromium 108 不兼容：dist/assets/${file} 含现代颜色语法`);
+  }
 }
 
 rmSync(out, { recursive: true, force: true });
@@ -46,24 +56,25 @@ if (!isDebug) {
 copyFileSync(resolve(utoolsDir, "preload.js"), resolve(out, "preload.js"));
 copyFileSync(resolve(utoolsDir, "plugin.json"), resolve(out, "plugin.json"));
 
-// 3. logo：复用 Tauri 图标（512×512），uTools 要求 logo ≤ 256×256，故用 sips 缩放后再写入。
-const logoSrc = resolve(root, "src-tauri/icons/icon.png");
+// 3. logo：使用仓库内专用的 256×256 PNG；构建时直接解析 PNG 头验证，跨平台一致。
+const logoSrc = resolve(utoolsDir, "logo.png");
 const logoOut = resolve(out, "logo.png");
-if (existsSync(logoSrc)) {
-  try {
-    execFileSync("sips", ["-z", "256", "256", logoSrc, "--out", logoOut], { stdio: "ignore" });
-  } catch (_) {
-    // sips 不可用（非 macOS）时退化为直接拷贝，发布前需自行确保尺寸 ≤256。
-    copyFileSync(logoSrc, logoOut);
-  }
-} else {
-  writeFileSync(logoOut, ""); // 占位，避免缺文件
+if (!existsSync(logoSrc)) throw new Error("utools/logo.png 不存在");
+const logo = readFileSync(logoSrc);
+if (logo.length < 24 || logo.toString("hex", 1, 4) !== "504e47") {
+  throw new Error("utools/logo.png 不是有效 PNG");
 }
+const logoWidth = logo.readUInt32BE(16);
+const logoHeight = logo.readUInt32BE(20);
+if (logoWidth > 256 || logoHeight > 256) {
+  throw new Error(`uTools logo 尺寸必须 ≤256×256，当前为 ${logoWidth}×${logoHeight}`);
+}
+copyFileSync(logoSrc, logoOut);
 
 // 4. 明确声明 CommonJS，保证 preload.js 在任何 Node 加载器下都按 CJS 解析
 writeFileSync(
   resolve(out, "package.json"),
-  JSON.stringify({ name: "prockill-utools", version: "0.1.0", type: "commonjs" }, null, 2)
+  JSON.stringify({ name: "prockill-utools", version: packageJson.version, type: "commonjs" }, null, 2)
 );
 
 console.log("✓ uTools 插件已生成: " + out);
