@@ -5,7 +5,11 @@ use std::env;
 mod kill;
 
 fn main() {
-    let pid: u32 = env::args().nth(1).expect("用法: killpid <pid>").parse().expect("pid");
+    let pid: u32 = env::args()
+        .nth(1)
+        .expect("用法: killpid <pid>")
+        .parse()
+        .expect("pid");
     let res = kill::kill_group(&[pid]);
     println!("ok={} killed={:?} err={:?}", res.ok, res.killed, res.error);
     if !res.ok {

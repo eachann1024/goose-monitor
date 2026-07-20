@@ -133,8 +133,7 @@ fn locate_icns(bundle: &Path) -> Option<PathBuf> {
     if let Ok(rd) = std::fs::read_dir(&resources) {
         for entry in rd.flatten() {
             let p = entry.path();
-            if p
-                .extension()
+            if p.extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.eq_ignore_ascii_case("icns"))
                 .unwrap_or(false)
@@ -193,7 +192,8 @@ fn extract_windows(exe_path: &str) -> Option<String> {
         return None;
     }
     // 唯一临时名（哈希 + 单调序号）：同一 exe 被并发抓取时各写各的文件，避免互相覆盖读到半截 PNG。
-    let tmp = std::env::temp_dir().join(format!("prockill-icon-{}.png", unique_tmp_suffix(exe_path)));
+    let tmp =
+        std::env::temp_dir().join(format!("prockill-icon-{}.png", unique_tmp_suffix(exe_path)));
     let tmp_str = tmp.to_string_lossy().replace('\'', "''");
     let src = exe_path.replace('\'', "''");
     // 提取关联图标 → 缩放到 64×64 高质量 → 存 PNG。失败（无图标/路径无效）时退出码非 0。
@@ -249,7 +249,9 @@ fn extract_linux(exe_path: &str) -> Option<String> {
     if let Some(h) = &home {
         roots.push(format!("{h}/.local/share/icons/hicolor"));
         roots.push(format!("{h}/.icons/hicolor"));
-        roots.push(format!("{h}/.local/share/flatpak/exports/share/icons/hicolor"));
+        roots.push(format!(
+            "{h}/.local/share/flatpak/exports/share/icons/hicolor"
+        ));
     }
 
     // 候选文件：优先大尺寸（更清晰），再 pixmaps 兜底。

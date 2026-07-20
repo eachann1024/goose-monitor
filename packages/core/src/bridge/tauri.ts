@@ -37,7 +37,8 @@ export class TauriBridge implements PlatformBridge {
   async killProcess(row: AppRow): Promise<KillResult> {
     const pids = row.allPids && row.allPids.length ? row.allPids : [row.pid];
     return (await this.invoke("kill_process", {
-      pid: row.pid,
+      id: row.id,
+      snapshotToken: row.snapshotToken,
       pids,
     })) as KillResult;
   }

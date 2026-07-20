@@ -101,11 +101,13 @@ function buildRow(seed: Seed): AppRow {
     ? FIXED_IDLE[seed.id]
     : (cpu < 1 ? 35 + Math.round(Math.random() * 40) : 0);
   return {
-    id: seed.id, name: seed.name, monogram: seed.monogram, color: seed.color,
+    id: seed.id, identity: `mock:${seed.id}`, snapshotToken: `mock-snapshot:${seed.id}`,
+    name: seed.name, monogram: seed.monogram, color: seed.color,
     procs, cpu, mem, pid: seed.pid, path: seed.path, helpers,
     sys: seed.sys, port: seed.port,
     allPids: [seed.pid, ...helpers.map((h) => h.pid)],
     idleMinutes,
+    autoCleanEligible: !seed.sys && (seed.path.startsWith("/Applications/") || (seed.path.startsWith("/Users/") && seed.path.includes("/Applications/"))),
   };
 }
 
