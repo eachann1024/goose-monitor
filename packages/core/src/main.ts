@@ -1,39 +1,51 @@
-/* ProcKill 主应用 —— 原生 TS 复刻设计稿（紧凑专家版 + 行内进程树 + Helper 合并）。
+/* ProcKill 主应用 —— 原生 TS 紧凑数据表（行内进程树 + Helper 合并）。
    由 bridge 驱动真实数据；浏览器无后端时走动态 mock。
 
    渲染策略（关键，去闪烁）：
-   - 骨架（header/sidebar/main/footer/滚动区）只 mount() 一次，永不销毁。
+   - 骨架（toolbar/main/滚动区）只 mount() 一次，永不销毁。
    - 之后所有刷新走 update*()，只改文本/样式/类，不重建 DOM。
    - 列表用 id→节点 的增量 diff：复用已有行、新增缺失行、移除消失行、
      只移动真正错位的节点。轮询刷新时 DOM 身份不变 → 数值跳动但绝不闪烁。 */
 import "./styles_guard";
-import { detectBridge, type PlatformBridge } from "./bridge";
-import type { AppRow, CategoryId, SystemStats } from "./types";
+import { detectBridge, usesEmbeddedSearch, type PlatformBridge } from "./bridge";
+import type { AppRow, Category, CategoryId, NetworkAppUsage } from "./types";
 import { layoutForCat, metricHdrLabel, type MetricCol } from "./category-layout";
-import { CATEGORIES, fmtMem, fmtCpu, modKeyLabel, isModKey, fuzzyMatch, fuzzyMatchScore } from "./shared";
+import {
+  visibleCategories,
+  CATEGORY_PREF_KEY,
+  QUERY_PREF_KEY,
+  SELECTION_PREF_KEY,
+  fmtMem,
+  fmtCpu,
+  fmtRate,
+  isModKey,
+  fuzzyMatch,
+  fuzzyMatchScore,
+  moveSelection,
+  sortProcessRows,
+  processSelectionKey,
+  reconcileSelectionKey,
+  restoreCategory,
+  restoreQuery,
+  rowsForGuiSnapshot,
+  searchInputKeyAction,
+  shouldOpenKillDialog,
+  centeredSelectionScroll,
+} from "./shared";
 import { icon } from "./icons";
-import { appIcon, meter, kbd, enterKey, h, highlight } from "./atoms";
-// 应用品牌图标（鹅的监控）——vite 处理为可用 URL，用于 uTools 插件标签等品牌位
-import BRAND_ICON_URL from "../assets/app-icon.png";
+import { appIcon, kbd, enterKey, h, highlight } from "./atoms";
 import {
   THEME_PREF_KEY,
   applyDataTheme,
-  cycleThemePref,
   installSystemThemeWatch,
   resolveEffectiveTheme,
   resolveThemeState,
-  themeButtonTitle,
-  themeIconForPref,
   type ThemePref,
   type UiTheme,
 } from "./theme";
 
-type SortKey = "mem" | "cpu" | "procs" | "name";
+type SortKey = "mem" | "cpu" | "procs" | "name" | "network" | "download" | "upload";
 type SortDir = "asc" | "desc";
-
-const SORTS: [SortKey, string][] = [
-  ["mem", "内存"], ["cpu", "CPU"], ["procs", "进程数"], ["name", "名称"],
-];
 
 // 列布局：category-layout.ts（每 tab 一套列）
 const REFRESH_MS = 2000;
@@ -42,17 +54,14 @@ interface State {
   cat: CategoryId;
   sortKey: SortKey;
   sortDir: SortDir;
-  sel: number;
+  selectedKey: string | null;
   expanded: Set<string>;
   dialogApp: AppRow | null;
-  dontRemind: boolean;
-  menuOpen: boolean;
   query: string;
-  searchOn: boolean;
   list: AppRow[]; // 当前分类的原始（未排序未过滤）列表
-  stats: SystemStats | null;
   loading: boolean;
   loadError: string | null;
+  networkUsage: Map<string, NetworkAppUsage>;
   theme: UiTheme;
   themePref: ThemePref;
 }
@@ -62,25 +71,32 @@ interface RowRefs {
   wrap: HTMLElement;      // 整组容器（主行 + 展开的 helper 行）
   row: HTMLElement;       // 主行
   caret: HTMLButtonElement; // 展开箭头容器
-  nameLine: HTMLElement;  // 名称行（含端口）
+  nameLine: HTMLElement;  // 名称行
   pathLine: HTMLElement;  // 路径行
   procWrap: HTMLElement;  // 进程数单元
-  cpuVal: HTMLElement; cpuMeter: HTMLElement;
-  memVal: HTMLElement; memMeter: HTMLElement;
-  pidCell: HTMLElement;
+  cpuVal: HTMLElement;
+  memVal: HTMLElement;
+  downloadVal: HTMLElement;
+  uploadVal: HTMLElement;
   helperBox: HTMLElement; // helper 行的挂载容器
   iconHolder: HTMLElement;
   signature: string;      // 上次渲染用的内容指纹，跳过无变化的更新
 }
 
+type RowFocusAction = "expand";
+interface RowFocusSnapshot { key: string; action: RowFocusAction }
+
 class ProcKillApp {
   private bridge: PlatformBridge;
+  private categories: Category[] = [];
+  private savedCategory: CategoryId;
   private root: HTMLElement;
   private s: State;
   private refreshTimer: number | null = null;
   // 仅在用户主动改变选中项（键盘上下导航）时置 true，updateList 据此把选中项滚入视野一次。
   // 轮询刷新不置位 → 不会在用户下滑时把列表强行拉回顶部。
-  private pendingScrollToSel = false;
+  private pendingScrollDirection: -1 | 1 | null = null;
+  private selectionFallbackIndex = 0;
   // 请求序号：每次发起 load/polling 自增并捕获当时的分类，返回时校验仍是最新请求且分类未变，
   // 否则丢弃——防止快速切分类时较慢的旧请求乱序返回，把旧分类数据写进当前分类标题下。
   private loadSeq = 0;
@@ -91,40 +107,31 @@ class ProcKillApp {
   private static readonly KILL_MASK_MS = 4000;
   private killingId: string | null = null;
   private dialogReturnFocus: HTMLElement | null = null;
+  private networkInFlight = false;
+  private lastNetworkStart = Number.NEGATIVE_INFINITY;
+  private static readonly NETWORK_CADENCE_MS = 5000;
 
   // ---- 持久骨架节点引用（mount 后填充，永不为 null）----
   private win!: HTMLElement;
-  private titleText!: HTMLElement;
-  private countBadge!: HTMLElement;
-  private sortBtnLabel!: Text;
-  private sortBtnArrow!: SVGElement | HTMLElement;
-  private sortBtn!: HTMLElement;
-  private sortMenuWrap!: HTMLElement;
+  private closeHint!: HTMLButtonElement;
   private categoryBtns: Record<string, { btn: HTMLElement; label: HTMLElement; key: HTMLElement }> = {};
-  // 分类快捷键角标：默认隐藏，按住主修饰键（mac=⌘ / win·linux=Ctrl）时整体显示。
-  private navKbds: HTMLElement[] = [];
-  private footerStats!: HTMLElement;
   private searchBar!: HTMLElement;
   private searchInput!: HTMLInputElement;
   private scroll!: HTMLElement;
   private headGrid!: HTMLElement;
   private emptyEl!: HTMLElement;
-  private footerSelName!: HTMLElement;
-  private footerKillBtn!: HTMLElement;
   private dialogLayer!: HTMLElement;     // 弹窗挂载层（持久，内容按需填充）
-  private themeBtn!: HTMLElement;        // 主题切换按钮
-  private searchBadge!: HTMLElement;     // uTools 模式下：搜索栏左侧「鹅的监控」插件标签
-  private searchTakeover!: HTMLElement;  // uTools 模式下：「uTools 输入框已接管」标识
 
   // 是否运行在 uTools 环境（用于叠加 uTools 专属视觉）
   private get isUtools(): boolean { return this.bridge.name === "utools"; }
+  private get usesEmbeddedSearch(): boolean { return usesEmbeddedSearch(this.bridge.name); }
 
   // 列表行复用表
   private rows = new Map<string, RowRefs>();
 
-  constructor(root: HTMLElement) {
+  constructor(root: HTMLElement, bridge: PlatformBridge) {
     this.root = root;
-    this.bridge = detectBridge();
+    this.bridge = bridge;
     // uTools 插件窗口高度由宿主动态决定，height:100% 链可能塌缩导致列表滚不动；
     // 打上标记后 CSS 改用 100vh 固定视口高度，确保滚动区能正确收敛并响应滚轮。
     if (this.bridge.name === "utools") document.body.classList.add("utools");
@@ -132,21 +139,21 @@ class ProcKillApp {
       this.bridge.getPref(THEME_PREF_KEY),
       this.isUtools,
     );
+    const initialCategory = restoreCategory(this.bridge.getPref(CATEGORY_PREF_KEY));
+    this.savedCategory = initialCategory;
     this.s = {
-      cat: "gui",
+      cat: initialCategory,
       sortKey: "mem",
       sortDir: "desc",
-      sel: 0,
+      // 每次打开都从当前结果的第一行开始；进程快照变化时仍由会话内选择键保持稳定。
+      selectedKey: null,
       expanded: new Set(),
       dialogApp: null,
-      dontRemind: this.bridge.getPref("pk_dont_remind") === "1",
-      menuOpen: false,
-      query: "",
-      searchOn: false,
+      query: restoreQuery(this.bridge.getPref(QUERY_PREF_KEY)),
       list: [],
-      stats: null,
       loading: true,
       loadError: null,
+      networkUsage: new Map(),
       theme,
       themePref,
     };
@@ -157,13 +164,6 @@ class ProcKillApp {
     this.s.theme = resolveEffectiveTheme(this.s.themePref, this.isUtools);
     const extra = this.win ? [this.win] : undefined;
     applyDataTheme(this.s.theme, extra);
-  }
-
-  private toggleTheme(): void {
-    this.s.themePref = cycleThemePref(this.s.themePref);
-    this.bridge.setPref(THEME_PREF_KEY, this.s.themePref);
-    this.refreshResolvedTheme();
-    this.update();
   }
 
   private installThemeWatch(): void {
@@ -192,18 +192,26 @@ class ProcKillApp {
   // ---------- 派生数据 ----------
   private sortList(list: AppRow[]): AppRow[] {
     const { sortKey, sortDir } = this.s;
-    return [...list].sort((a, b) => {
+    const sorted = sortKey === "network" || sortKey === "download" || sortKey === "upload"
+      ? [...list].sort((a, b) => {
+          const usage = (row: AppRow) => this.s.networkUsage.get(processSelectionKey(row));
+          const value = (row: AppRow) => {
+            const item = usage(row);
+            if (!item) return -1;
+            if (sortKey === "download") return item.downloadBps;
+            if (sortKey === "upload") return item.uploadBps;
+            return item.downloadBps + item.uploadBps;
+          };
+          return (sortDir === "asc" ? 1 : -1) * (value(a) - value(b));
+        })
+      : sortProcessRows(list, sortKey, sortDir);
+    return sorted.sort((a, b) => {
       const q = this.s.query.trim();
       if (q) {
         const bySearch = this.searchScore(a, q) - this.searchScore(b, q);
         if (bySearch !== 0) return bySearch;
       }
-      if (sortKey === "name") {
-        const byName = a.name.localeCompare(b.name);
-        return sortDir === "asc" ? byName : -byName;
-      }
-      const byMetricDesc = ((b as any)[sortKey] || 0) - ((a as any)[sortKey] || 0);
-      return sortDir === "desc" ? byMetricDesc : -byMetricDesc;
+      return 0;
     });
   }
 
@@ -242,23 +250,41 @@ class ProcKillApp {
   private invalidateVisible(): void { this.visibleCache = null; }
 
   private get selApp(): AppRow | null {
-    const v = this.visible;
-    return v[Math.min(this.s.sel, v.length - 1)] || null;
+    const key = this.s.selectedKey;
+    return key ? this.visible.find((row) => processSelectionKey(row) === key) || null : null;
   }
 
   // ---------- 数据加载 ----------
   async load(initial = false): Promise<void> {
+    if (this.s.cat === "net" && this.networkInFlight) return;
     const seq = ++this.loadSeq;
     const cat = this.s.cat;
+    if (cat === "net") {
+      this.networkInFlight = true;
+      this.lastNetworkStart = performance.now();
+    }
     try {
-      const [list, stats] = await Promise.all([
-        this.bridge.listProcesses(cat),
-        this.bridge.systemStats(),
-      ]);
+      let list: AppRow[];
+      if (cat === "gui") {
+        const [all, snapshot] = await Promise.all([
+          this.bridge.listProcesses("all"),
+          this.bridge.getGuiSnapshot(),
+        ]);
+        const matched = rowsForGuiSnapshot(all, snapshot);
+        if (!matched) throw new Error(snapshot.error || "可见窗口采集失败");
+        list = matched;
+      } else if (cat === "net") {
+        const snapshot = await this.bridge.getNetworkSnapshot();
+        if (snapshot.status !== "supported") throw new Error(snapshot.error || "网络采样失败");
+        this.s.networkUsage = new Map(snapshot.apps.map((item) => [processSelectionKey(item.app), item]));
+        list = snapshot.apps.map((item) => item.app);
+      } else {
+        list = await this.bridge.listProcesses(cat);
+      }
       // 期间又发起了新请求 / 分类已切走 → 丢弃这份过期结果，避免串台。
       if (seq !== this.loadSeq || cat !== this.s.cat) return;
+      this.rememberSelectionIndex();
       this.s.list = this.maskKilled(list);
-      this.s.stats = stats;
       this.s.loading = false;
       this.s.loadError = null;
       this.update();
@@ -266,9 +292,14 @@ class ProcKillApp {
       if (seq !== this.loadSeq || cat !== this.s.cat) return;
       console.error("[ProcKill] load failed", e);
       this.s.loading = false;
-      this.s.loadError = "读取进程失败，请检查权限后重试";
+      const message = cat === "net" ? "网络采样失败，已保留上次结果" :
+        cat === "gui" ? "可见窗口刷新失败，已保留上次结果" :
+        "读取进程失败，请检查权限后重试";
+      this.s.loadError = message;
+      if (this.s.list.length) this.toast(message);
       this.update();
     } finally {
+      if (cat === "net") this.networkInFlight = false;
       if (initial) this.startPolling();
     }
   }
@@ -278,31 +309,17 @@ class ProcKillApp {
     this.refreshTimer = window.setInterval(() => {
       if (this.s.dialogApp) return;     // 弹窗打开时不刷新，避免选中态跳动
       if (document.hidden) return;      // 窗口隐藏/最小化时不刷新
-      const seq = ++this.loadSeq;
-      const cat = this.s.cat;
-      Promise.all([this.bridge.listProcesses(cat), this.bridge.systemStats()])
-        .then(([list, stats]) => {
-          // 丢弃过期/串台的轮询结果（期间手动刷新或切了分类）
-          if (seq !== this.loadSeq || cat !== this.s.cat) return;
-          this.s.list = this.maskKilled(list);
-          this.s.stats = stats;
-          this.s.loadError = null;
-          this.update();
-        })
-        .catch((error) => {
-          console.error("[ProcKill] polling failed", error);
-          this.s.loadError = "刷新失败，当前数据可能已过期";
-          this.update();
-        });
+      if (this.s.cat === "net" && performance.now() - this.lastNetworkStart < ProcKillApp.NETWORK_CADENCE_MS) return;
+      void this.load();
     }, REFRESH_MS);
   }
 
-  // ---------- 操作 ----------
+  // ---------- 进程动作 ----------
   private async doKill(app: AppRow): Promise<void> {
     if (this.killingId) return;
+    this.rememberSelectionIndex();
     this.killingId = app.id;
     this.update();
-    const before = this.visible.length;
     try {
       const res = await this.bridge.killProcess(app);
       if (res.ok) {
@@ -312,8 +329,7 @@ class ProcKillApp {
         // ② 短时遮罩该 id：真实后端进程退出有延迟，接下来一两次刷新仍可能列出它
         this.recentlyKilled.set(app.id, performance.now() + ProcKillApp.KILL_MASK_MS);
         this.s.list = this.s.list.filter((a) => a.id !== app.id);
-        const after = before - 1;
-        if (this.s.sel >= after) this.s.sel = Math.max(0, after - 1);
+        if (this.s.selectedKey === processSelectionKey(app)) this.setSelectedKey(null);
       } else {
         this.toast(`结束失败：${res.error || "权限不足或进程已退出"}`);
       }
@@ -341,13 +357,10 @@ class ProcKillApp {
 
   private tryKill(app: AppRow | null): void {
     if (!app || this.killingId) return;
-    if (this.s.dontRemind) this.doKill(app);
-    else {
-      this.dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      this.s.dialogApp = app;
-      this.update();
-      window.setTimeout(() => this.dialogLayer.querySelector<HTMLElement>("[data-dialog-primary]")?.focus(), 0);
-    }
+    this.dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    this.s.dialogApp = app;
+    this.update();
+    window.setTimeout(() => this.dialogLayer.querySelector<HTMLElement>("[data-dialog-primary]")?.focus(), 0);
   }
 
   private restoreDialogFocus(): void {
@@ -371,15 +384,16 @@ class ProcKillApp {
 
   private rebuildListHeader(): void {
     const lay = layoutForCat(this.s.cat);
+    this.headGrid.title = this.s.cat === "net" ? "网络速率约每 5 秒更新" : "";
     this.headGrid.style.gridTemplateColumns = lay.gridTemplate;
     this.headGrid.replaceChildren();
     this.headGrid.appendChild(h("span"));
     this.headGrid.appendChild(h("span", { className: "t-label", text: lay.nameHdr }));
     for (const m of lay.metrics) {
-      if (m === "cpu" || m === "mem") {
+      if (m === "cpu" || m === "mem" || m === "download" || m === "upload") {
         this.headGrid.appendChild(this.sortHdr(metricHdrLabel(m), m));
       } else {
-        const align = m === "path" ? "left" : "right";
+        const align = m === "path" ? "left" : "center";
         this.headGrid.appendChild(h("span", {
           className: "t-label",
           style: { textAlign: align },
@@ -387,7 +401,6 @@ class ProcKillApp {
         }));
       }
     }
-    this.headGrid.appendChild(h("span", { className: "t-label", style: { textAlign: "right" }, text: "操作" }));
   }
 
   private refreshGridLayout(): void {
@@ -396,13 +409,39 @@ class ProcKillApp {
     for (const [, ref] of this.rows) ref.row.style.gridTemplateColumns = cols;
   }
 
+  private setSelectedKey(key: string | null): void {
+    this.s.selectedKey = key;
+    this.bridge.setPref(SELECTION_PREF_KEY, key ?? "");
+  }
+
+  private rememberSelectionIndex(): void {
+    if (!this.s.selectedKey) return;
+    const index = this.visible.findIndex((row) => processSelectionKey(row) === this.s.selectedKey);
+    if (index >= 0) this.selectionFallbackIndex = index;
+  }
+
+  private setQuery(query: string): void {
+    this.selectionFallbackIndex = 0;
+    // 搜索结果变化后默认选中第一条，避免沿用仍然命中的旧选中项。
+    this.setSelectedKey(null);
+    this.s.query = restoreQuery(query);
+    this.bridge.setPref(QUERY_PREF_KEY, this.s.query);
+  }
+
   private setCat(cat: CategoryId): void {
-    if (cat === this.s.cat) return;
+    if (cat === this.s.cat || !this.categories.some((category) => category.id === cat)) return;
     this.s.cat = cat;
+    if (cat === "net") { this.s.sortKey = "network"; this.s.sortDir = "desc"; }
+    else if (this.s.sortKey === "network" || this.s.sortKey === "download" || this.s.sortKey === "upload") {
+      this.s.sortKey = cat === "cpu" ? "cpu" : "mem";
+      this.s.sortDir = "desc";
+    }
+    this.bridge.setPref(CATEGORY_PREF_KEY, cat);
     this.refreshGridLayout();
-    this.s.sel = 0;
-    this.s.menuOpen = false;
+    this.setSelectedKey(null);
+    this.selectionFallbackIndex = 0;
     this.s.loading = true;
+    this.s.loadError = null;
     // 立刻清掉旧分类数据，否则 update() 会用旧 list 渲染、在新标题下短暂闪现旧分类行；
     // 若随后 load() 失败，旧数据还会永久残留。清空后进入加载态，新数据到了再 diff 填充。
     this.s.list = [];
@@ -411,13 +450,11 @@ class ProcKillApp {
     this.load();
   }
 
-  // 设置搜索词并展开搜索框（uTools 带词进入 / 子输入框驱动）。
+  // 设置搜索词（uTools 带词进入 / 子输入框驱动）。
   private setSearch(query: string, focus: boolean): void {
-    this.s.searchOn = true;
-    this.s.query = query;
-    this.s.sel = 0;
+    this.setQuery(query);
     this.update();
-    if (focus) window.setTimeout(() => this.searchInput?.focus(), 0);
+    if (focus && !this.isUtools) window.setTimeout(() => this.searchInput?.focus(), 0);
   }
 
   private toast(msg: string): void {
@@ -438,24 +475,12 @@ class ProcKillApp {
   }
 
   // ---------- 键盘 ----------
-  /** 按住主修饰键时显示分类角标，松开/失焦时隐藏。 */
-  private setNavKbdVisible(on: boolean): void {
-    this.win.classList.toggle("mod-hint", on);
-  }
-
   private installKeys(): void {
-    // 修饰键按下/松开切换角标显隐；窗口失焦兜底复位，防止角标卡在显示态。
-    window.addEventListener("keydown", (e) => { if (isModKey(e)) this.setNavKbdVisible(true); });
-    window.addEventListener("keyup", (e) => { if (!isModKey(e)) this.setNavKbdVisible(false); });
-    window.addEventListener("blur", () => this.setNavKbdVisible(false));
-
     window.addEventListener("keydown", (e) => {
       const mod = isModKey(e);
       const s = this.s;
       if (s.dialogApp) {
-        const dlg = s.dialogApp;
         if (e.key === "Escape") { e.preventDefault(); this.closeDialog(); }
-        else if (e.key === "Enter" && !this.killingId) { e.preventDefault(); this.doKill(dlg); }
         else if (e.key === "Tab") {
           const focusable = Array.from(this.dialogLayer.querySelectorAll<HTMLElement>("button, [tabindex]:not([tabindex='-1'])"))
             .filter((el) => !el.hasAttribute("disabled"));
@@ -470,10 +495,24 @@ class ProcKillApp {
         }
         return;
       }
-      // ⌘1–6 / Ctrl1–6 切分类（Windows/Linux 用 Ctrl，已由 e.ctrlKey 覆盖）
-      if (mod && e.key >= "1" && e.key <= "6") {
+      // 搜索框保留普通输入/左右键，只把 Esc 与上下键交给结果列表。
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      if (target === this.searchInput) {
+        const action = searchInputKeyAction(e.key);
+        if (action === "clear") {
+          e.preventDefault();
+          this.setQuery("");
+          this.update();
+          return;
+        }
+        if (action === "native" && !shouldOpenKillDialog(e.key, "search", false)) return;
+      } else if (target?.closest("input, textarea, select, button, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='checkbox'], [role='tab'], [role='menuitem']")) {
+        return;
+      }
+      // ⌘/Ctrl + 1–5 切换固定分类。
+      if (mod && e.key >= "1" && e.key <= String(this.categories.length)) {
         e.preventDefault();
-        const c = CATEGORIES[+e.key - 1];
+        const c = this.categories[+e.key - 1];
         if (c) this.setCat(c.id);
         return;
       }
@@ -491,22 +530,23 @@ class ProcKillApp {
         this.setSearch(s.query, true);
         return;
       }
-      // 在搜索框里打字时不拦截普通键（除导航/取消/确认）
-      if (
-        document.activeElement === this.searchInput &&
-        !["Escape", "Enter", "ArrowDown", "ArrowUp"].includes(e.key)
-      ) return;
-
       const v = this.visible;
-      if (e.key === "ArrowDown" || e.key.toLowerCase() === "j") {
+      const current = s.selectedKey
+        ? v.findIndex((row) => processSelectionKey(row) === s.selectedKey)
+        : -1;
+      if (e.key === "ArrowDown") {
         e.preventDefault();
-        s.sel = Math.min(v.length - 1, s.sel + 1);
-        this.pendingScrollToSel = true;
+        const next = moveSelection(current, 1, v.length);
+        this.setSelectedKey(next >= 0 ? processSelectionKey(v[next]) : null);
+        this.selectionFallbackIndex = Math.max(0, next);
+        this.pendingScrollDirection = 1;
         this.update();
-      } else if (e.key === "ArrowUp" || e.key.toLowerCase() === "k") {
+      } else if (e.key === "ArrowUp") {
         e.preventDefault();
-        s.sel = Math.max(0, s.sel - 1);
-        this.pendingScrollToSel = true;
+        const next = moveSelection(current, -1, v.length);
+        this.setSelectedKey(next >= 0 ? processSelectionKey(v[next]) : null);
+        this.selectionFallbackIndex = Math.max(0, next);
+        this.pendingScrollDirection = -1;
         this.update();
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
@@ -516,10 +556,7 @@ class ProcKillApp {
         e.preventDefault();
         const a = this.selApp;
         if (a && s.expanded.has(a.id)) this.toggleExpand(a);
-      } else if (e.key === " ") {
-        e.preventDefault();
-        this.toggleExpand(this.selApp);
-      } else if (e.key === "Enter") {
+      } else if (shouldOpenKillDialog(e.key, target === this.searchInput ? "search" : "list", false)) {
         e.preventDefault();
         this.tryKill(this.selApp);
       } else if (e.key === "r" && mod) {
@@ -527,7 +564,7 @@ class ProcKillApp {
         this.load();
       } else if (e.key === "Escape") {
         if (s.query || document.activeElement === this.searchInput) {
-          s.query = ""; this.searchInput?.blur();
+          this.setQuery(""); this.searchInput?.blur();
           this.update();
         }
       }
@@ -545,9 +582,7 @@ class ProcKillApp {
     // uTools 顶部子输入框实时驱动过滤（text 可能为空 → 清空过滤）。
     w.__prockillSubInput = (text: string) => {
       const q = typeof text === "string" ? text : "";
-      this.s.searchOn = true;
-      this.s.query = q;
-      this.s.sel = 0;
+      this.setQuery(q);
       this.update();
     };
   }
@@ -559,14 +594,10 @@ class ProcKillApp {
     this.win = h("div", {
       className: "win",
       attrs: { "data-theme": this.s.theme },
-      on: { click: () => { if (this.s.menuOpen) { this.s.menuOpen = false; this.update(); } } },
     });
 
     this.win.appendChild(this.buildHeader());
-    this.win.appendChild(this.buildCategoryTabs());
     this.win.appendChild(this.buildMain());
-
-    this.win.appendChild(this.buildFooter());
 
     // 弹窗层（持久，默认隐藏）
     this.dialogLayer = h("div");
@@ -577,164 +608,74 @@ class ProcKillApp {
 
   private buildHeader(): HTMLElement {
     const s = this.s;
-
-    const brand = appIcon({ id: "__brand", identity: "brand:goose-monitor", snapshotToken: "brand", name: "鹅的监控", monogram: "鹅", color: "#F5B544", procs: 1, cpu: 0, mem: 0, pid: 0, path: "", helpers: [], iconUrl: BRAND_ICON_URL }, 18, 5);
-    // 视图标题用衬线显示体(Newsreader + Noto Serif SC),复刻 goose-run 暖极简标题
-    this.titleText = h("span", { style: { font: "600 16px/22px var(--font-serif)", color: "var(--fg-1)", whiteSpace: "nowrap" }, text: "鹅的监控" });
-    this.countBadge = h("span", {
+    const enterLabel = this.bridge.runtimePlatform === "mac" ? "↩" : "Enter";
+    this.closeHint = h("button", {
+      className: "pk-close-hint",
+      attrs: { type: "button", "aria-label": "关闭当前选中应用（打开确认框）", title: "关闭当前选中应用（始终需要确认）" },
       style: {
-        font: "var(--t-mono-sm)", color: "var(--fg-3)",
+        color: "var(--fg-2)", whiteSpace: "nowrap", marginLeft: "auto", height: "30px",
+        display: "inline-flex", alignItems: "center", gap: "6px", padding: "0 8px",
+        border: "1px solid transparent", borderRadius: "7px", background: "transparent", cursor: "pointer",
       },
-    });
-    const titleWrap = h("div", { style: { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" }, children: [brand, this.titleText, this.countBadge] });
-
-    // 排序按钮
-    this.sortBtnArrow = icon("arrow-down-wide-narrow", 13, { color: "var(--fg-2)" } as any);
-    this.sortBtnLabel = document.createTextNode("");
-    this.sortBtn = h("button", {
+      on: { click: () => this.tryKill(this.selApp) },
+      children: [kbd(enterLabel), document.createTextNode("关闭应用")],
+    }) as HTMLButtonElement;
+    this.searchInput = h("input", {
+      attrs: { placeholder: "搜索名称、PID…", "aria-label": "过滤进程" },
       style: {
-        display: "inline-flex", alignItems: "center", gap: "5px", height: "28px",
-        padding: "0 9px", borderRadius: "7px",
-        background: "var(--bg-elev)", border: "1px solid var(--border-1)", color: "var(--fg-1)",
-        font: "var(--t-sm)", cursor: "pointer", whiteSpace: "nowrap",
+        width: "150px", minWidth: "0", background: "transparent", border: "none", outline: "none",
+        color: "var(--fg-1)", font: "var(--t-sm)",
       },
-      on: { click: (e) => { e.stopPropagation(); s.menuOpen = !s.menuOpen; this.update(); } },
-    });
-    this.sortBtn.appendChild(this.sortBtnArrow);
-    this.sortBtn.appendChild(this.sortBtnLabel);
-    this.sortBtn.appendChild(icon("chevron-down", 13, { color: "var(--fg-3)" } as any));
-
-    this.sortMenuWrap = h("div", { style: { position: "relative" }, children: [this.sortBtn] });
-
-    const searchBtn = h("button", {
-      attrs: { title: "搜索 ⌘F" },
+      on: { input: (e) => { this.setQuery((e.target as HTMLInputElement).value); this.update(); } },
+    }) as HTMLInputElement;
+    this.searchBar = h("div", {
+      className: "pk-toolbar-search",
+      attrs: { role: "search" },
       style: {
-        width: "28px", height: "28px", display: "grid", placeItems: "center",
-        borderRadius: "7px", background: "transparent", border: "1px solid transparent",
-        color: "var(--fg-2)", cursor: "pointer",
+        width: "190px", height: "28px", flex: "none", display: "flex", alignItems: "center",
+        gap: "7px", padding: "0 9px", borderRadius: "7px", background: "var(--bg-panel)",
+        border: "1px solid var(--border-1)",
       },
-      on: { click: (e) => { e.stopPropagation(); this.setSearch(s.query, true); } },
-      children: [icon("search", 15)],
+      children: [icon("search", 13, { color: "var(--fg-3)" } as any), this.searchInput],
     });
-
-    const refreshBtn = h("button", {
-      attrs: { title: "刷新 ⌘R" },
-      style: {
-        width: "28px", height: "28px", display: "grid", placeItems: "center",
-        borderRadius: "7px", background: "transparent", border: "1px solid transparent",
-        color: "var(--fg-2)", cursor: "pointer",
-      },
-      on: { click: (e) => { e.stopPropagation(); this.load(); } },
-      children: [icon("refresh", 15)],
-    });
-
-    // 主题切换按钮（深色显示太阳=点击转浅色，浅色显示月亮=点击转深色）；图标内容由 updateHeader 维护
-    this.themeBtn = h("button", {
-      attrs: { title: "切换主题" },
-      style: {
-        width: "28px", height: "28px", display: "grid", placeItems: "center",
-        borderRadius: "7px", background: "transparent", border: "1px solid transparent",
-        color: "var(--fg-2)", cursor: "pointer",
-      },
-      on: { click: (e) => { e.stopPropagation(); this.toggleTheme(); } },
-    });
-
-    const right = h("div", {
-      style: { display: "flex", alignItems: "center", gap: "8px" },
-      children: [this.sortMenuWrap, searchBtn, this.themeBtn, refreshBtn],
-    });
-
-    return h("header", {
-      style: {
-        height: "42px", flex: "none", display: "flex", alignItems: "center",
-        justifyContent: "space-between", padding: "0 12px 0 16px",
-        borderBottom: "1px solid var(--border-1)", background: "var(--bg-panel)",
-        position: "relative", zIndex: "5",
-      },
-      children: [titleWrap, right],
-    });
-  }
-
-  private buildSortMenu(): HTMLElement {
-    const s = this.s;
-    const menu = h("div", {
-      style: {
-        position: "absolute", right: "0", top: "34px", width: "168px",
-        background: "var(--bg-elev)", border: "1px solid var(--border-2)",
-        borderRadius: "10px", boxShadow: "var(--shadow-pop)", padding: "5px", zIndex: "20",
-      },
-      on: { click: (e) => e.stopPropagation() },
-    });
-    for (const [k, l] of SORTS) {
-      const btn = h("button", {
-        style: {
-          display: "flex", width: "100%", alignItems: "center", gap: "8px",
-          height: "30px", padding: "0 9px", borderRadius: "7px", border: "none",
-          cursor: "pointer", background: k === s.sortKey ? "var(--bg-row-sel)" : "transparent",
-          color: "var(--fg-1)", font: "var(--t-sm)", textAlign: "left",
-        },
-        on: { click: () => { this.setSortKey(k); s.menuOpen = false; this.update(); } },
-        children: [h("span", { style: { flex: "1" }, text: l })],
-      });
-      if (k === s.sortKey) btn.appendChild(icon("check", 14, { color: "var(--accent)" } as any));
-      menu.appendChild(btn);
-    }
-    menu.appendChild(h("div", { style: { height: "1px", background: "var(--border-1)", margin: "5px 0" } }));
-    const dirBtn = h("button", {
-      style: {
-        display: "flex", width: "100%", alignItems: "center", gap: "8px",
-        height: "30px", padding: "0 9px", borderRadius: "7px", border: "none",
-        cursor: "pointer", background: "transparent", color: "var(--fg-2)",
-        font: "var(--t-sm)", textAlign: "left",
-      },
-      on: { click: () => { s.sortDir = s.sortDir === "desc" ? "asc" : "desc"; this.update(); } },
-    });
-    dirBtn.appendChild(icon("arrow-down-wide-narrow", 13, {
-      transform: s.sortDir === "asc" ? "scaleY(-1)" : "none",
-    } as any));
-    dirBtn.appendChild(document.createTextNode(
-      (s.sortDir === "desc" ? "降序 ↓" : "升序 ↑") + "（点击切换）",
-    ));
-    menu.appendChild(dirBtn);
-    return menu;
-  }
-
-  private buildCategoryTabs(): HTMLElement {
-    const s = this.s;
     const tabs = h("div", {
       className: "pk-cat-tabs",
       attrs: { role: "tablist", "aria-label": "进程分类" },
-      style: {
-        height: "34px", flex: "none", display: "flex", alignItems: "center", gap: "4px",
-        padding: "0 12px", borderBottom: "1px solid var(--border-1)",
-        background: "var(--bg-sidebar)", overflowX: "auto", overflowY: "hidden",
-      },
+      style: { display: "flex", alignItems: "center", gap: "2px", minWidth: "0", overflowX: "auto", overflowY: "hidden" },
     });
-    this.navKbds = [];
-    const kbdWide = modKeyLabel !== "⌘";
-    for (const c of CATEGORIES) {
-      const labelText = c.label.replace(" 占用", "").replace("网络 / 端口", "网络").replace("界面应用", "界面").replace("全部进程", "全部");
-      const label = h("span", { style: { font: "var(--t-sm)", color: "var(--fg-2)", whiteSpace: "nowrap" }, text: labelText });
-      const key = kbd(`${modKeyLabel}${c.key}`, kbdWide, "pk-cat-kbd");
-      this.navKbds.push(key);
+    for (const c of this.categories) {
+      const label = h("span", { style: { font: "var(--t-sm)", color: "var(--fg-2)", whiteSpace: "nowrap" }, text: c.label });
+      const key = h("span", { style: { display: "none" } });
       const btn = h("button", {
-        attrs: { role: "tab", "aria-selected": c.id === s.cat ? "true" : "false" },
+        className: "pk-cat-tab",
+        attrs: {
+          role: "tab",
+          "aria-selected": c.id === s.cat ? "true" : "false",
+          tabindex: c.id === s.cat ? "0" : "-1",
+          ...(c.id === s.cat ? { "data-active": "" } : {}),
+        },
         style: {
-          display: "inline-flex", alignItems: "center", gap: "6px", height: "24px",
-          padding: "0 9px", borderRadius: "7px", border: "1px solid transparent",
-          cursor: "pointer", textAlign: "left", background: "transparent", flex: "none",
+          display: "inline-flex", alignItems: "center", height: "26px", padding: "0 9px",
+          borderRadius: "7px", border: "1px solid transparent", cursor: "pointer",
+          textAlign: "left", background: "transparent", flex: "none",
         },
         on: {
           click: () => this.setCat(c.id),
-          mouseenter: () => { if (c.id !== s.cat) btn.style.background = "var(--bg-row-hover)"; },
-          mouseleave: () => { if (c.id !== s.cat) btn.style.background = "transparent"; },
+          keydown: (event) => this.onCategoryKeydown(event as KeyboardEvent, c.id),
         },
-        children: [label, key],
+        children: [label],
       });
       this.categoryBtns[c.id] = { btn, label, key };
       tabs.appendChild(btn);
     }
-    return tabs;
+    return h("header", {
+      className: `pk-toolbar${this.usesEmbeddedSearch ? " pk-toolbar--dev" : ""}`,
+      style: {
+        height: "42px", flex: "none", display: "flex", alignItems: "center", gap: "8px",
+        padding: "0 10px", borderBottom: "1px solid var(--border-1)", background: "var(--bg-sidebar)",
+      },
+      children: [tabs, this.closeHint, ...(this.usesEmbeddedSearch ? [this.searchBar] : [])],
+    });
   }
 
   private buildMain(): HTMLElement {
@@ -749,48 +690,9 @@ class ProcKillApp {
       },
     });
 
-    // 搜索栏（持久，按 searchOn 显隐）。uTools 环境下叠加「接管」视觉。
-    const umode = this.isUtools;
-    this.searchInput = h("input", {
-      attrs: { placeholder: umode ? "uTools 输入框已接管，输入即过滤…" : "过滤名称、路径、PID 或 Helper…", "aria-label": "过滤进程" },
-      style: {
-        flex: "1", background: "transparent", border: "none", outline: "none",
-        color: "var(--fg-1)", font: "var(--t-base)",
-      },
-      on: { input: (e) => { s.query = (e.target as HTMLInputElement).value; s.sel = 0; this.update(); } },
-    }) as HTMLInputElement;
-
-    // uTools 模式不显示搜索栏左侧品牌标签，让搜索框占满整行。
-    this.searchBadge = h("span", { style: { display: "none" } });
-
-    // uTools 模式：右侧「uTools 输入框已接管」accent 标识
-    this.searchTakeover = h("span", {
-      className: "t-xs",
-      style: { display: umode ? "inline-flex" : "none", alignItems: "center", color: "var(--fg-3)", fontWeight: "600", flex: "none" },
-      text: "uTools 输入框已接管",
-    });
-
-    this.searchBar = h("div", {
-      style: {
-        height: umode ? "40px" : "36px", flex: "none", display: "flex", alignItems: "center",
-        gap: "10px", padding: "0 14px", borderBottom: "1px solid var(--border-1)",
-      },
-      children: [
-        this.searchBadge,
-        icon("search", 14, { color: "var(--fg-3)" } as any),
-        this.searchInput,
-        this.searchTakeover,
-        h("button", {
-          style: { border: "none", background: "transparent", color: "var(--fg-3)", font: "var(--t-xs)", cursor: "pointer", flex: "none" },
-          text: "清除 Esc",
-          on: { click: () => { s.query = ""; this.searchInput.blur(); this.update(); } },
-        }),
-      ],
-    });
-    main.appendChild(this.searchBar);
-
     // 列头（按分类 tab 重建列）
     this.headGrid = h("div", {
+      className: "pk-list-head",
       style: {
         display: "grid", gap: "6px", alignItems: "center",
         padding: "0 12px", height: "24px", flex: "none", borderBottom: "1px solid var(--border-1)",
@@ -802,7 +704,7 @@ class ProcKillApp {
     // 列表滚动区（持久）
     this.scroll = h("div", {
       className: "scroll",
-      attrs: { id: "pk-scroll", role: "listbox", "aria-label": "进程列表" },
+      attrs: { id: "pk-scroll", role: "listbox", tabindex: "0", "aria-label": "进程列表，使用上下方向键移动选择" },
       style: { flex: "1 1 auto", minHeight: "0", overflowY: "auto" },
     });
     // 空态/加载态提示（持久，按需显隐）
@@ -818,10 +720,14 @@ class ProcKillApp {
     const s = this.s;
     const arrow = icon("chevron-down", 11, {} as any);
     const btn = h("button", {
-      attrs: { "data-key": key },
+      attrs: {
+        "data-key": key,
+        "aria-label": `按${label}排序`,
+        "aria-sort": s.sortKey === key ? (s.sortDir === "asc" ? "ascending" : "descending") : "none",
+      },
       style: {
-        border: "none", background: "transparent", cursor: "pointer", textAlign: "right",
-        display: "inline-flex", alignItems: "center", justifyContent: "flex-end", gap: "3px",
+        width: "100%", border: "none", background: "transparent", cursor: "pointer", textAlign: "center",
+        display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "3px",
         padding: "0", font: "var(--t-label)", textTransform: "uppercase",
         letterSpacing: "0.07em", fontWeight: "600", color: "var(--fg-3)",
       },
@@ -836,46 +742,6 @@ class ProcKillApp {
     return btn;
   }
 
-  private buildFooter(): HTMLElement {
-    const hint = (key: string | HTMLElement, t: string) =>
-      h("span", { style: { display: "inline-flex", alignItems: "center", gap: "6px", flex: "none", whiteSpace: "nowrap" }, children: [
-        typeof key === "string" ? kbd(key) : key,
-        h("span", { className: "t-xs", style: { color: "var(--fg-3)" }, text: t }),
-      ] });
-
-    this.footerSelName = h("span", { className: "t-xs", style: { color: "var(--fg-3)", display: "none" } });
-    this.footerStats = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", whiteSpace: "nowrap" }, text: "tauri · utools" });
-    this.footerKillBtn = h("button", {
-      attrs: { type: "button" },
-      className: "pk-footer-close",
-      on: { click: () => this.tryKill(this.selApp) },
-      children: [document.createTextNode("关闭 "), enterKey()],
-    });
-
-    const right = h("span", {
-      style: { marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: "8px", whiteSpace: "nowrap", flex: "none" },
-      children: [this.footerStats, this.footerSelName, this.footerKillBtn],
-    });
-
-    // 左侧快捷键提示：整组可收缩并裁剪，空间不足时优先保证右侧 stats / 结束进程按钮完整。
-    // uTools 窗口偏窄，精简为最关键的几项，避免提示被挤压换行 / 截断。
-    const hints = this.isUtools
-      ? [hint("j / k", "移动"), hint("␣", "展开/合并"), hint("/", "过滤")]
-      : [hint("j / k", "移动"), hint("␣", "展开/合并"), hint(enterKey(), "关闭"), hint("/", "过滤"), hint(`${modKeyLabel}1–6`, "分类")];
-    const hintsWrap = h("span", {
-      style: { display: "flex", alignItems: "center", gap: "14px", flex: "1 1 auto", minWidth: "0", overflow: "hidden" },
-      children: hints,
-    });
-
-    return h("footer", {
-      style: {
-        height: "30px", flex: "none", display: "flex", alignItems: "center", gap: "14px",
-        padding: "0 12px", borderTop: "1px solid var(--border-1)", background: "var(--bg-sidebar)",
-      },
-      children: [hintsWrap, right],
-    });
-  }
-
   // ============================================================
   //  增量更新（每帧调用，只改变化的部分）
   // ============================================================
@@ -883,60 +749,34 @@ class ProcKillApp {
     this.invalidateVisible();
     const v = this.visible;
     const s = this.s;
-    // 选中位收敛到有效范围
-    if (s.sel >= v.length) s.sel = Math.max(0, v.length - 1);
+    this.win.setAttribute("data-category", s.cat);
+    if (!(s.loading && v.length === 0)) {
+      const restored = reconcileSelectionKey(s.selectedKey, v, this.selectionFallbackIndex);
+      if (restored !== s.selectedKey) this.setSelectedKey(restored);
+      if (restored) this.selectionFallbackIndex = Math.max(0, v.findIndex((row) => processSelectionKey(row) === restored));
+    }
 
     this.updateHeader(v);
     this.updateTabs();
     this.updateSearchBar();
     this.updateList(v);
-    this.updateFooter();
     this.updateDialog();
   }
 
   private updateHeader(v: AppRow[]): void {
     const s = this.s;
-    this.titleText.textContent = "鹅的监控";
-    const totalProcs = v.reduce((sum, row) => sum + row.procs, 0);
-    const catLabel = CATEGORIES.find((c) => c.id === s.cat)!.label;
-    this.countBadge.textContent = `${v.length} 应用 · ${totalProcs} 进程 · ${catLabel}`;
-
-    // 主题按钮：深色态显示太阳（点击切到浅色），浅色态显示月亮（点击切到深色）。仅图标变化时重建。
-    const wantIcon = themeIconForPref(s.themePref);
-    const wantTitle = themeButtonTitle(s.themePref);
-    if (this.themeBtn.getAttribute("data-icon") !== wantIcon) {
-      this.themeBtn.replaceChildren(icon(wantIcon, 15));
-      this.themeBtn.setAttribute("data-icon", wantIcon);
-    }
-    if (this.themeBtn.title !== wantTitle) {
-      this.themeBtn.title = wantTitle;
-    }
-
-    this.sortBtnLabel.textContent = SORTS.find((x) => x[0] === s.sortKey)![1];
-    this.sortBtn.style.background = s.menuOpen ? "var(--bg-row-sel)" : "var(--bg-elev)";
-    (this.sortBtnArrow as HTMLElement).style.transform = s.sortDir === "asc" ? "scaleY(-1)" : "none";
-
-    // 排序菜单显隐：只增删菜单节点，按钮本身不动
-    const existing = this.sortMenuWrap.querySelector(".pk-sortmenu") as HTMLElement | null;
-    if (s.menuOpen && !existing) {
-      const m = this.buildSortMenu();
-      m.classList.add("pk-sortmenu");
-      this.sortMenuWrap.appendChild(m);
-    } else if (!s.menuOpen && existing) {
-      existing.remove();
-    } else if (s.menuOpen && existing) {
-      // 重建菜单内容以反映最新选中/方向（菜单很小，重建无感知）
-      const m = this.buildSortMenu();
-      m.classList.add("pk-sortmenu");
-      existing.replaceWith(m);
-    }
+    this.closeHint.disabled = !this.selApp || !!this.killingId;
+    this.closeHint.style.opacity = this.closeHint.disabled ? "0.45" : "1";
+    this.closeHint.style.cursor = this.closeHint.disabled ? "default" : "pointer";
 
     // 列头高亮 + 箭头（仅可排序的 CPU/内存列）
     for (const hdr of this.headGrid.querySelectorAll("button[data-key]")) {
       const el = hdr as HTMLElement;
       const key = el.getAttribute("data-key") as SortKey;
       const active = s.sortKey === key;
-      el.style.color = active ? "var(--accent)" : "var(--fg-3)";
+      el.style.color = active ? "var(--fg-1)" : "var(--fg-3)";
+      el.setAttribute("aria-sort", active ? (s.sortDir === "asc" ? "ascending" : "descending") : "none");
+      el.setAttribute("aria-label", `按${el.textContent?.trim() || "指标"}排序，当前${active ? (s.sortDir === "asc" ? "升序" : "降序") : "未排序"}`);
       const arrow = (el as HTMLElement & { __arrow?: HTMLElement }).__arrow;
       if (arrow) {
         arrow.style.display = active ? "" : "none";
@@ -947,29 +787,37 @@ class ProcKillApp {
 
   private updateTabs(): void {
     const s = this.s;
-    for (const c of CATEGORIES) {
+    for (const c of this.categories) {
       const ref = this.categoryBtns[c.id];
       const on = c.id === s.cat;
-      ref.btn.style.background = on ? "var(--bg-row-sel)" : "transparent";
-      ref.btn.style.borderColor = on ? "var(--border-2)" : "transparent";
+      ref.btn.style.background = "transparent";
+      ref.btn.style.borderColor = "transparent";
       ref.label.style.color = on ? "var(--fg-1)" : "var(--fg-2)";
       ref.btn.setAttribute("aria-selected", on ? "true" : "false");
+      ref.btn.setAttribute("tabindex", on ? "0" : "-1");
+      if (on) ref.btn.setAttribute("data-active", "");
+      else ref.btn.removeAttribute("data-active");
     }
-    const stats = s.stats;
-    const cpuPct = stats ? Math.round(stats.cpuPercent) : 0;
-    const memUsed = stats ? stats.memUsedMb : 0;
-    if (this.footerStats) {
-      this.footerStats.textContent = this.s.loadError
-        ? `${this.bridge.name} · ${this.s.loadError}`
-        : `${this.bridge.name} · CPU ${cpuPct}% · 内存 ${fmtMem(memUsed)}`;
-    }
+  }
+
+  private onCategoryKeydown(event: KeyboardEvent, id: CategoryId): void {
+    const index = this.categories.findIndex((category) => category.id === id);
+    if (index < 0) return;
+    let next = index;
+    if (event.key === "ArrowRight") next = (index + 1) % this.categories.length;
+    else if (event.key === "ArrowLeft") next = (index - 1 + this.categories.length) % this.categories.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = this.categories.length - 1;
+    else return;
+    event.preventDefault();
+    const category = this.categories[next];
+    this.setCat(category.id);
+    window.setTimeout(() => this.categoryBtns[category.id]?.btn.focus(), 0);
   }
 
   private updateSearchBar(): void {
     const s = this.s;
-    // uTools 环境：顶部子输入框已由 setSubInput 接管（preload.js），内嵌搜索栏冗余，隐藏之。
-    // 过滤仍由 uTools 顶部输入框经 __prockillSubInput 驱动，体验与独立窗口的 uTools 搜索框一致。
-    this.searchBar.style.display = this.isUtools ? "none" : "flex";
+    // 正式 uTools 只使用宿主 subInput；该紧凑输入框仅存在于浏览器开发 mock。
     // 仅当值不同步时写入，避免打断输入法/光标
     if (this.searchInput.value !== s.query) this.searchInput.value = s.query;
   }
@@ -977,27 +825,33 @@ class ProcKillApp {
   // 列表增量 diff：复用/新增/移除/重排，只动必要节点。
   private updateList(v: AppRow[]): void {
     const s = this.s;
+    const focusSnapshot = this.captureRowFocus();
+    if (v.length === 0) this.scroll.removeAttribute("aria-activedescendant");
 
     // 加载中且无数据：显示加载态，清空行
     if (s.loading && v.length === 0) {
       this.showEmpty("正在读取进程…");
       this.clearAllRows();
+      this.restoreRowFocus(focusSnapshot, v);
       return;
     }
     if (s.loadError && v.length === 0) {
       this.showEmpty(s.loadError);
       this.clearAllRows();
+      this.restoreRowFocus(focusSnapshot, v);
       return;
     }
     if (v.length === 0) {
       this.showEmpty(s.query ? "没有匹配的进程" : "没有进程");
       this.clearAllRows();
+      this.restoreRowFocus(focusSnapshot, v);
       return;
     }
     this.emptyEl.style.display = "none";
+    const selected = this.selApp;
+    if (selected) this.scroll.setAttribute("aria-activedescendant", `pk-row-${this.domId(selected.id)}`);
+    else this.scroll.removeAttribute("aria-activedescendant");
 
-    const maxCpu = Math.max(1, ...v.map((a) => a.cpu));
-    const maxMem = Math.max(1, ...v.map((a) => a.mem));
     const wantIds = new Set(v.map((a) => a.id));
 
     // 1) 删除已消失的行
@@ -1013,7 +867,7 @@ class ProcKillApp {
         ref = this.buildRow(a);
         this.rows.set(a.id, ref);
       }
-      this.updateRow(ref, a, i, s.sel === i, maxCpu, maxMem);
+      this.updateRow(ref, a, i, s.selectedKey === processSelectionKey(a));
 
       // 顺序校正：当前 wrap 应紧跟在 prev 之后
       const shouldFollow = prev ? prev.nextSibling : this.scroll.firstChild;
@@ -1023,22 +877,25 @@ class ProcKillApp {
       prev = ref.wrap;
     });
 
-    // 把选中项滚入视野：仅在用户主动改变选中项时滚动一次。
-    // 否则轮询刷新会反复把默认选中的首项滚回顶部，打断用户下滑浏览。
-    const sel = this.pendingScrollToSel ? this.selApp : null;
-    this.pendingScrollToSel = false;
-    const el = sel && this.rows.get(sel.id)?.wrap;
-    if (el) {
+    this.restoreRowFocus(focusSnapshot, v);
+
+    // 方向键选择越过可视中线后才跟随；轮询与鼠标选择不触发居中大跳。
+    const direction = this.pendingScrollDirection;
+    const sel = direction ? this.selApp : null;
+    this.pendingScrollDirection = null;
+    const el = sel && this.rows.get(sel.id)?.row;
+    if (el && direction) {
       const cont = this.scroll;
-      // 用 getBoundingClientRect 相对容器算偏移，避免依赖 offsetParent 链
-      // （wrap/scroll 无定位时 offsetTop 会把 header 等高度算进去，导致滚动错位）。
       const rRect = el.getBoundingClientRect();
       const cRect = cont.getBoundingClientRect();
-      const top = rRect.top - cRect.top + cont.scrollTop;
-      const bottom = top + rRect.height;
-      if (top < cont.scrollTop) cont.scrollTop = top - 8;
-      else if (bottom > cont.scrollTop + cont.clientHeight)
-        cont.scrollTop = bottom - cont.clientHeight + 8;
+      cont.scrollTop = centeredSelectionScroll({
+        scrollTop: cont.scrollTop,
+        clientHeight: cont.clientHeight,
+        scrollHeight: cont.scrollHeight,
+        rowTop: rRect.top - cRect.top + cont.scrollTop,
+        rowHeight: rRect.height,
+        direction,
+      });
     }
   }
 
@@ -1051,20 +908,45 @@ class ProcKillApp {
     this.rows.clear();
   }
 
+  private domId(value: string): string {
+    return value.replace(/[^a-zA-Z0-9_-]/g, "-");
+  }
+
+  private captureRowFocus(): RowFocusSnapshot | null {
+    const active = document.activeElement as HTMLElement | null;
+    const actionEl = active?.closest<HTMLElement>("[data-row-action]");
+    const row = actionEl?.closest<HTMLElement>(".pk-process-row");
+    const key = row?.getAttribute("data-selection-key");
+    const action = actionEl?.getAttribute("data-row-action");
+    if (!key || action !== "expand") return null;
+    return { key, action };
+  }
+
+  private restoreRowFocus(snapshot: RowFocusSnapshot | null, rows: AppRow[]): void {
+    if (!snapshot) return;
+    const app = rows.find((row) => encodeURIComponent(processSelectionKey(row)) === snapshot.key);
+    if (!app) {
+      this.scroll.focus({ preventScroll: true });
+      return;
+    }
+    const ref = this.rows.get(app.id);
+    ref?.caret.focus({ preventScroll: true });
+  }
+
   private rowCellsForLayout(
     caret: HTMLElement,
     nameCol: HTMLElement,
     procWrap: HTMLElement,
     cpuCol: HTMLElement,
     memCol: HTMLElement,
-    pidCell: HTMLElement,
+    downloadCol: HTMLElement,
+    uploadCol: HTMLElement,
   ): HTMLElement[] {
     const map: Record<MetricCol, HTMLElement> = {
-      procs: procWrap, cpu: cpuCol, mem: memCol, port: procWrap, path: procWrap,
+      procs: procWrap, cpu: cpuCol, mem: memCol, download: downloadCol, upload: uploadCol, path: procWrap,
     };
     const cells: HTMLElement[] = [caret, nameCol];
     for (const m of layoutForCat(this.s.cat).metrics) cells.push(map[m]);
-    cells.push(pidCell);
     return cells;
   }
 
@@ -1074,42 +956,42 @@ class ProcKillApp {
     const wrap = h("div");
 
     const caret = h("button", {
-      attrs: { type: "button", "aria-label": `${a.name} 的子进程`, "aria-expanded": "false" },
+      attrs: { type: "button", "data-row-action": "expand", "aria-label": `${a.name} 的子进程`, "aria-expanded": "false" },
       style: {
         width: "16px", height: "16px", display: "grid", placeItems: "center",
         border: "none", background: "transparent", cursor: "pointer", padding: "0",
       },
-      on: { click: (e) => { e.stopPropagation(); this.toggleExpand(this.findById(a.id)); } },
+      on: { click: (e) => { e.stopPropagation(); this.selectById(a.id, false); this.toggleExpand(this.findById(a.id)); } },
     });
 
     const iconHolder = h("span", { style: { display: "inline-flex" } });
     const nameLine = h("div", { className: "t-sm", style: { color: "var(--fg-1)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: "0" } });
-    const pathLine = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", flex: "none" } });
+    const pathLine = h("span", { className: "pk-row-pid", style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", flex: "none" } });
     const nameCol = h("div", { style: { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" }, children: [iconHolder, nameLine, pathLine] });
 
-    const procWrap = h("div", { style: { textAlign: "right" } });
-    const cpuVal = h("span", { className: "t-mono", style: { fontSize: "11px", minWidth: "44px", textAlign: "right" } });
-    const cpuMeter = h("div", { style: { display: "inline-flex", justifyContent: "flex-end", width: "100%" } });
-    const cpuCol = h("div", { style: { textAlign: "right", display: "flex", alignItems: "center", justifyContent: "flex-end", gap: "6px" }, children: [cpuMeter, cpuVal] });
-    const memVal = h("span", { className: "t-mono", style: { fontSize: "11px", minWidth: "56px", textAlign: "right" } });
-    const memMeter = h("div", { style: { display: "inline-flex", justifyContent: "flex-end", width: "100%" } });
-    const memCol = h("div", { style: { textAlign: "right", display: "flex", alignItems: "center", justifyContent: "flex-end", gap: "6px" }, children: [memMeter, memVal] });
-    const pidCell = h("div", { style: { textAlign: "right", font: "var(--t-mono-sm)", color: "var(--fg-3)" } });
+    const procWrap = h("div", { className: "num", style: { textAlign: "center" } });
+    const cpuVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "center" } });
+    const cpuCol = h("div", { style: { textAlign: "center" }, children: [cpuVal] });
+    const memVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "center" } });
+    const memCol = h("div", { style: { textAlign: "center" }, children: [memVal] });
+    const downloadVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "center", whiteSpace: "nowrap" } });
+    const downloadCol = h("div", { className: "pk-network-download", style: { textAlign: "center" }, children: [downloadVal] });
+    const uploadVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "center", whiteSpace: "nowrap" } });
+    const uploadCol = h("div", { className: "pk-network-upload", style: { textAlign: "center" }, children: [uploadVal] });
 
     const row = h("div", {
-      attrs: { role: "option", tabindex: "-1", "aria-selected": "false" },
+      className: "pk-process-row",
+      attrs: { id: `pk-row-${this.domId(a.id)}`, role: "option", tabindex: "-1", "aria-selected": "false" },
       style: {
         display: "grid", gridTemplateColumns: layoutForCat(this.s.cat).gridTemplate, alignItems: "center", gap: "6px",
-        padding: "0 12px", height: "30px", cursor: "pointer", position: "relative",
+        padding: "0 12px", height: "38px", cursor: "pointer", position: "relative",
         background: "transparent",
       },
       on: {
         click: () => { this.selectById(a.id); },
         dblclick: () => this.toggleExpand(this.findById(a.id)),
-        mouseenter: () => { if (!row.hasAttribute("data-sel")) row.style.background = "var(--bg-row-hover)"; },
-        mouseleave: () => { if (!row.hasAttribute("data-sel")) row.style.background = "transparent"; },
       },
-      children: this.rowCellsForLayout(caret, nameCol, procWrap, cpuCol, memCol, pidCell),
+      children: this.rowCellsForLayout(caret, nameCol, procWrap, cpuCol, memCol, downloadCol, uploadCol),
     });
 
     const helperBox = h("div");
@@ -1118,7 +1000,7 @@ class ProcKillApp {
 
     return {
       wrap, row, caret, nameLine, pathLine, procWrap,
-      cpuVal, cpuMeter, memVal, memMeter, pidCell, helperBox, iconHolder,
+      cpuVal, memVal, downloadVal, uploadVal, helperBox, iconHolder,
       signature: "",
     };
   }
@@ -1126,28 +1008,26 @@ class ProcKillApp {
   private findById(id: string): AppRow | null {
     return this.visible.find((a) => a.id === id) || null;
   }
-  private selectById(id: string): void {
-    const idx = this.visible.findIndex((a) => a.id === id);
-    if (idx >= 0) { this.s.sel = idx; this.update(); }
+  private selectById(id: string, focusList = true): void {
+    const index = this.visible.findIndex((a) => a.id === id);
+    const app = index >= 0 ? this.visible[index] : null;
+    if (app) {
+      this.selectionFallbackIndex = index;
+      this.setSelectedKey(processSelectionKey(app));
+      this.update();
+      if (focusList) this.scroll.focus({ preventScroll: true });
+    }
   }
 
   private fillMetricCells(
     ref: RowRefs,
     a: AppRow,
     metrics: readonly MetricCol[],
-    maxCpu: number,
-    maxMem: number,
   ): void {
     const show = new Set(metrics);
     const clear = (el: HTMLElement) => { el.replaceChildren(); };
-    if (!show.has("procs") && !show.has("port") && !show.has("path")) clear(ref.procWrap);
-    else if (show.has("port")) {
-      ref.procWrap.style.textAlign = "right";
-      ref.procWrap.replaceChildren(h("span", {
-        style: { font: "var(--t-mono-sm)", color: "var(--metric-net)", whiteSpace: "nowrap" },
-        text: a.port ? ":" + a.port : "—",
-      }));
-    } else if (show.has("path")) {
+    if (!show.has("procs") && !show.has("path")) clear(ref.procWrap);
+    else if (show.has("path")) {
       ref.procWrap.style.textAlign = "left";
       ref.procWrap.replaceChildren(h("span", {
         style: {
@@ -1157,10 +1037,10 @@ class ProcKillApp {
         text: a.path,
       }));
     } else if (show.has("procs")) {
-      ref.procWrap.style.textAlign = "right";
+      ref.procWrap.style.textAlign = "center";
       if (a.procs > 1) {
         ref.procWrap.replaceChildren(h("span", {
-          style: { font: "var(--t-mono-sm)", color: "var(--accent)", whiteSpace: "nowrap" },
+          style: { font: "var(--t-mono-sm)", color: "var(--fg-2)", whiteSpace: "nowrap" },
           text: "×" + a.procs,
         }));
       } else {
@@ -1169,32 +1049,35 @@ class ProcKillApp {
     }
     if (show.has("cpu")) {
       ref.cpuVal.textContent = fmtCpu(a.cpu);
-      ref.cpuMeter.replaceChildren(meter(a.cpu, maxCpu, "var(--metric-cpu)", 3, 34));
     } else {
       ref.cpuVal.textContent = "";
-      clear(ref.cpuMeter);
     }
     if (show.has("mem")) {
       ref.memVal.textContent = fmtMem(a.mem);
-      ref.memMeter.replaceChildren(meter(a.mem, maxMem, "var(--metric-mem)", 3, 40));
     } else {
       ref.memVal.textContent = "";
-      clear(ref.memMeter);
     }
+    const usage = this.s.networkUsage.get(processSelectionKey(a));
+    ref.downloadVal.textContent = show.has("download") ? (usage ? fmtRate(usage.downloadBps) : "采样中") : "";
+    ref.uploadVal.textContent = show.has("upload") ? (usage ? fmtRate(usage.uploadBps) : "采样中") : "";
   }
 
   // 更新一行的内容（只在指纹变化时改 DOM）。
-  private updateRow(ref: RowRefs, a: AppRow, index: number, selected: boolean, maxCpu: number, maxMem: number): void {
+  private updateRow(ref: RowRefs, a: AppRow, index: number, selected: boolean): void {
     const s = this.s;
     const expanded = s.expanded.has(a.id);
+    ref.row.setAttribute("data-selection-key", encodeURIComponent(processSelectionKey(a)));
     // 指纹：决定是否需要重绘这一行（含值、选中、展开、量尺基准、图标相关、helper 明细）。
     // helper 明细必须纳入：展开态下，即便父级聚合值四舍五入后不变，helper 的 pid/cpu/mem 仍可能变。
-    // 图标字段（sys/iconUrl/color/monogram）纳入：真实图标异步补上或同 id 状态变化时要能重画。
+    // 图标字段纳入：真实图标异步补上或系统归属变化时要能重画。
     const q = s.query.trim().toLowerCase();
     const sig = [
-      a.cpu, a.mem, a.procs, a.pid, a.name, a.path, a.port || "",
-      selected ? 1 : 0, expanded ? 1 : 0, maxCpu, maxMem,
-      a.sys ? 1 : 0, a.iconUrl || "", a.color, a.monogram,
+      a.cpu, a.mem, a.procs, a.pid, a.name, a.path,
+      this.s.networkUsage.get(processSelectionKey(a))?.downloadBps ?? "",
+      this.s.networkUsage.get(processSelectionKey(a))?.uploadBps ?? "",
+      a.snapshotToken, (a.allPids || []).join(","),
+      selected ? 1 : 0, expanded ? 1 : 0,
+      a.sys ? 1 : 0, a.systemOwned ? 1 : 0, a.iconUrl || "",
       q, // 搜索词纳入：改词时已渲染行要重画匹配高亮
       s.cat,
       a.helpers.map((hp) => `${hp.pid}:${hp.cpu}:${hp.mem}:${hp.name}:${hp.role}`).join(","),
@@ -1205,25 +1088,30 @@ class ProcKillApp {
     }
     ref.signature = sig;
 
-    // 选中态
-    ref.row.style.background = selected ? "var(--bg-row-sel)" : "transparent";
-    ref.row.style.boxShadow = selected ? "inset 0 0 0 1px var(--accent)" : "none";
-    if (selected) ref.row.setAttribute("data-sel", "1");
-    else ref.row.removeAttribute("data-sel");
+    // 选中样式由 CSS 驱动（轻底 + 左线）；wrap 的 data-sel 让展开 helper 继承组选中底色。
+    if (selected) {
+      ref.row.setAttribute("data-sel", "1");
+      ref.wrap.setAttribute("data-sel", "1");
+    } else {
+      ref.row.removeAttribute("data-sel");
+      ref.wrap.removeAttribute("data-sel");
+    }
     ref.row.setAttribute("aria-selected", selected ? "true" : "false");
-    ref.row.tabIndex = selected ? 0 : -1;
+    // 焦点保留在 listbox，通过 aria-activedescendant 表达当前项，避免轮询时焦点跳动。
+    ref.row.tabIndex = -1;
 
     // 展开箭头
-    ref.caret.style.cursor = a.helpers.length ? "pointer" : "default";
+    const canExpand = a.helpers.length > 0;
+    ref.caret.style.cursor = canExpand ? "pointer" : "default";
     ref.caret.setAttribute("aria-expanded", expanded ? "true" : "false");
-    ref.caret.disabled = a.helpers.length === 0;
+    ref.caret.disabled = !canExpand;
     ref.caret.replaceChildren();
-    if (a.helpers.length > 0) {
+    if (canExpand) {
       ref.caret.appendChild(icon(expanded ? "chevron-down" : "chevron-right", 13, { color: "var(--fg-3)" } as any));
     }
 
-    // 图标：仅在视觉相关字段（id/sys 尺寸/真实图标/品牌色/字形）变化时重建，平时复用避免重画。
-    const iconSig = `${a.id}|${a.sys ? 1 : 0}|${a.iconUrl || ""}|${a.color}|${a.monogram}`;
+    // 图标：仅在视觉相关字段变化时重建，平时复用避免重画。
+    const iconSig = `${a.id}|${a.sys ? 1 : 0}|${a.systemOwned ? 1 : 0}|${a.iconUrl || ""}`;
     if (!ref.iconHolder.firstChild || ref.iconHolder.getAttribute("data-icon-sig") !== iconSig) {
       ref.iconHolder.replaceChildren(appIcon(a, a.sys ? 18 : 18, a.sys ? 5 : 5));
       ref.iconHolder.setAttribute("data-icon-sig", iconSig);
@@ -1231,18 +1119,10 @@ class ProcKillApp {
 
     const lay = layoutForCat(s.cat);
     ref.nameLine.replaceChildren(highlight(a.name, q));
-    if (a.port && !lay.metrics.includes("port")) {
-      ref.nameLine.appendChild(h("span", { style: { font: "var(--t-mono-sm)", color: "var(--metric-net)", marginLeft: "8px" }, text: ":" + a.port }));
-    }
     ref.pathLine.replaceChildren(document.createTextNode(
       lay.metrics.includes("path") ? "" : String(a.pid),
     ));
-    this.fillMetricCells(ref, a, lay.metrics, maxCpu, maxMem);
-
-    ref.pidCell.replaceChildren();
-    if (selected) {
-      ref.pidCell.appendChild(h("span", { className: "pk-row-close", children: [enterKey(), document.createTextNode("关闭")] }));
-    }
+    this.fillMetricCells(ref, a, lay.metrics);
 
     // 展开的 Helper 行
     if (expanded && a.helpers.length) {
@@ -1254,48 +1134,37 @@ class ProcKillApp {
 
   private buildHelperRow(hp: AppRow["helpers"][number], q: string): HTMLElement {
     const hr = h("div", {
+      className: "pk-helper-row",
       style: {
         display: "grid", gridTemplateColumns: layoutForCat(this.s.cat).gridTemplate, alignItems: "center", gap: "6px",
-        padding: "0 12px", height: "26px", background: "var(--bg-helper-row)",
+        padding: "0 12px", height: "24px", background: "var(--bg-helper-row)",
       },
     });
     hr.appendChild(h("span"));
     const cell = h("div", {
       style: { display: "flex", alignItems: "center", gap: "8px", minWidth: "0", paddingLeft: "16px", position: "relative" },
     });
-    cell.appendChild(h("span", { style: { position: "absolute", left: "5px", top: "-13px", width: "1px", height: "26px", background: "var(--border-2)" } }));
-    cell.appendChild(h("span", { style: { position: "absolute", left: "5px", top: "13px", width: "9px", height: "1px", background: "var(--border-2)" } }));
+    cell.appendChild(h("span", { style: { position: "absolute", left: "5px", top: "-12px", width: "1px", height: "24px", background: "var(--border-2)" } }));
+    cell.appendChild(h("span", { style: { position: "absolute", left: "5px", top: "12px", width: "9px", height: "1px", background: "var(--border-2)" } }));
     const hName = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } });
     hName.appendChild(highlight(hp.name, q));
     cell.appendChild(hName);
     cell.appendChild(h("span", { style: { font: "var(--t-xs)", color: "var(--fg-3)", padding: "0 5px", borderRadius: "4px", background: "var(--bg-elev)", whiteSpace: "nowrap", flex: "none" }, text: hp.role }));
+    cell.appendChild(h("span", { className: "pk-row-pid", style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", whiteSpace: "nowrap", flex: "none" }, text: String(hp.pid) }));
     hr.appendChild(cell);
     for (const m of layoutForCat(this.s.cat).metrics) {
       if (m === "cpu") {
-        hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "right" }, text: fmtCpu(hp.cpu) }));
+        hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "center" }, text: fmtCpu(hp.cpu) }));
       } else if (m === "mem") {
-        hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "right" }, text: fmtMem(hp.mem) }));
+        hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "center" }, text: fmtMem(hp.mem) }));
       } else {
         hr.appendChild(h("span"));
       }
     }
-    hr.appendChild(h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", textAlign: "right" }, text: String(hp.pid) }));
     return hr;
   }
 
-  private updateFooter(): void {
-    const sel = this.selApp;
-    if (sel) {
-      this.footerSelName.textContent = "已选 " + sel.name;
-      this.footerSelName.style.display = "";
-      this.footerKillBtn.classList.add("pk-footer-close--on");
-    } else {
-      this.footerSelName.style.display = "none";
-      this.footerKillBtn.classList.remove("pk-footer-close--on");
-    }
-  }
-
-  // 弹窗：按需在持久层里建/拆，内容随 dontRemind 等更新。
+  // 弹窗：按需在持久层里建/拆。
   private updateDialog(): void {
     const app = this.s.dialogApp;
     if (!app) { this.dialogLayer.replaceChildren(); return; }
@@ -1303,12 +1172,11 @@ class ProcKillApp {
   }
 
   private buildConfirm(app: AppRow): HTMLElement {
-    const s = this.s;
     const scrim = h("div", {
       className: "scrim",
       attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": "pk-confirm-title" },
       style: {
-        position: "absolute", inset: "0", background: "rgba(20,15,10,0.52)",
+        position: "absolute", inset: "0", background: "rgba(0,0,0,0.56)",
         backdropFilter: "blur(3px)", display: "grid", placeItems: "center", zIndex: "50",
       },
       on: { click: () => this.closeDialog() },
@@ -1347,31 +1215,6 @@ class ProcKillApp {
     p.appendChild(document.createTextNode("，未保存的内容可能会丢失。"));
     card.appendChild(p);
 
-    const checkbox = h("span", {
-      style: {
-        width: "18px", height: "18px", borderRadius: "5px",
-        background: s.dontRemind ? "var(--accent)" : "var(--bg-panel)",
-        border: s.dontRemind ? "none" : "1px solid var(--border-2)",
-        display: "grid", placeItems: "center", flex: "none",
-      },
-    });
-    if (s.dontRemind) checkbox.appendChild(icon("check", 13, { color: "#fff" } as any));
-    const label = h("button", {
-      attrs: { type: "button", role: "checkbox", "aria-checked": s.dontRemind ? "true" : "false" },
-      style: {
-        display: "flex", alignItems: "center", gap: "9px", marginTop: "16px", padding: "0",
-        border: "none", background: "transparent", color: "inherit", font: "inherit",
-        cursor: "pointer", userSelect: "none",
-      },
-      on: { click: () => {
-        s.dontRemind = !s.dontRemind;
-        this.bridge.setPref("pk_dont_remind", s.dontRemind ? "1" : "0");
-        this.update();
-      } },
-      children: [checkbox, h("span", { style: { font: "var(--t-sm)", color: "var(--fg-2)" }, text: "以后不再提醒，直接关闭" })],
-    });
-    card.appendChild(label);
-
     const cancelBtn = h("button", {
       style: {
         flex: "1", height: "38px", borderRadius: "9px", background: "var(--bg-panel)",
@@ -1399,7 +1242,15 @@ class ProcKillApp {
     return scrim;
   }
 
-  start(): void {
+  async start(): Promise<void> {
+    const [gui, network] = await Promise.all([
+      this.bridge.getGuiCapability(),
+      this.bridge.getNetworkCapability(),
+    ]);
+    this.categories = visibleCategories(gui.status === "supported", network.status === "supported");
+    this.s.cat = restoreCategory(this.savedCategory, this.categories);
+    if (this.s.cat !== this.savedCategory) this.bridge.setPref(CATEGORY_PREF_KEY, "all");
+    if (this.s.cat === "net") this.s.sortKey = "network";
     this.mount();
     this.installKeys();
     this.installUtoolsHooks();
@@ -1409,9 +1260,23 @@ class ProcKillApp {
   }
 }
 
-// 启动
 const rootEl = document.getElementById("app")!;
-const app = new ProcKillApp(rootEl);
-app.start();
-// 暴露给调试
-(window as any).__prockill = app;
+detectBridge().then((bridge) => {
+  const app = new ProcKillApp(rootEl, bridge);
+  void app.start();
+  (window as any).__prockill = app;
+}).catch((error) => {
+  const message = error instanceof Error ? error.message : "插件初始化失败，进程数据不可用。";
+  console.error("[ProcKill] bootstrap failed", error);
+  rootEl.replaceChildren(h("main", {
+    attrs: { role: "alert" },
+    style: {
+      minHeight: "100vh", display: "grid", placeItems: "center", padding: "24px",
+      background: "var(--bg-panel)", color: "var(--fg-1)", textAlign: "center",
+    },
+    children: [h("div", { children: [
+      h("div", { style: { font: "var(--t-lg)", marginBottom: "8px" }, text: "插件暂不可用" }),
+      h("div", { style: { font: "var(--t-sm)", color: "var(--fg-2)" }, text: message }),
+    ] })],
+  }));
+});
