@@ -80,13 +80,26 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   -webkit-appearance: none;
   appearance: none;
   box-shadow: none;
+  transition: background 100ms ease, box-shadow 100ms ease;
 }
+.pk-cat-tab:hover:not([data-active]) {
+  background: var(--bg-row-hover) !important;
+}
+/* 激活：软 pill，无描边 */
 .pk-cat-tab[data-active] {
-  box-shadow: inset 0 -2px 0 var(--fg-1);
+  background: var(--bg-panel) !important;
+  box-shadow: none;
+}
+.pk-cat-tab[data-active] > span:first-child {
+  color: var(--fg-1);
+  font-weight: 600;
 }
 .pk-cat-tab:focus-visible {
   outline: none;
   background: var(--bg-row-hover) !important;
+}
+.pk-cat-tab[data-active]:focus-visible {
+  background: var(--bg-panel) !important;
 }
 input::placeholder { color: var(--fg-3); opacity: 1; }
 .pk-list-head .t-label,
@@ -107,19 +120,39 @@ input::placeholder { color: var(--fg-3); opacity: 1; }
   visibility: visible;
   opacity: 1;
 }
+.pk-app-group {
+  position: relative;
+}
+/* 未选中 hover：整行轻底 */
 .pk-process-row:hover {
   background: var(--bg-row-hover) !important;
 }
-/* 方案 A：选中组轻底 + 左线；已选中 hover 不被 hover 底覆盖 */
-.pk-process-row[data-sel],
-.pk-process-row[data-sel]:hover {
-  background: var(--bg-row-sel) !important;
-  box-shadow: inset 2px 0 0 var(--accent);
+/* 选中组：圆角轻底，无描边 */
+.pk-app-group[data-sel]::before {
+  content: "";
+  position: absolute;
+  inset: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg-row-sel);
+  pointer-events: none;
+  z-index: 0;
 }
-/* 展开 helper 与主行同组选中底色（wrap 带 data-sel） */
-[data-sel] > .pk-helper-row,
-[data-sel] .pk-helper-row {
-  background: var(--bg-row-sel) !important;
+.pk-app-group[data-sel] > * {
+  position: relative;
+  z-index: 1;
+}
+/* 主行与 helper 交给组卡片，避免叠色；hover 不盖过 selected */
+.pk-process-row[data-sel],
+.pk-process-row[data-sel]:hover,
+.pk-app-group[data-sel] .pk-process-row,
+.pk-app-group[data-sel] .pk-process-row:hover,
+.pk-app-group[data-sel] .pk-helper-row {
+  background: transparent !important;
+  box-shadow: none;
+}
+/* 选中时名称略加重，键盘定位更清楚 */
+.pk-process-row[data-sel] .t-sm {
+  font-weight: 600;
 }
 @media (hover: none) {
   .pk-row-pid {

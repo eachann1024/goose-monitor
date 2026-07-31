@@ -1,17 +1,120 @@
 /* 共享纯逻辑：分类定义、格式化、颜色/字形生成、Helper 角色推断。
-   这些函数不触碰任何平台 API，浏览器/Tauri/uTools 都复用。 */
-import type { Category, AppRow } from "./types";
+   这些函数不触碰平台 API，uTools 与浏览器开发 mock 共用。 */
+import type { Category, AppRow, GuiSnapshot } from "./types";
 
-export const CATEGORIES: Category[] = [
-  { id: "gui", label: "界面应用", icon: "layout-grid", key: "1" },
-  { id: "all", label: "全部进程", icon: "list", key: "2" },
-  { id: "cpu", label: "CPU 占用", icon: "cpu", key: "3" },
-  { id: "mem", label: "内存占用", icon: "memory-stick", key: "4" },
-  { id: "net", label: "网络 / 端口", icon: "wifi", key: "5" },
-  { id: "bg", label: "后台服务", icon: "server", key: "6" },
+export const QUERY_PREF_KEY = "pk_query";
+export const CATEGORY_PREF_KEY = "pk_category";
+export const SELECTION_PREF_KEY = "pk_selected_process";
+
+export const ALL_CATEGORIES: Category[] = [
+  { id: "all", label: "全部", icon: "list", key: "1" },
+  { id: "gui", label: "界面", icon: "monitor", key: "2" },
+  { id: "cpu", label: "CPU", icon: "cpu", key: "3" },
+  { id: "mem", label: "内存", icon: "memory-stick", key: "4" },
+  { id: "net", label: "网络", icon: "wifi", key: "5" },
+  { id: "bg", label: "后台", icon: "server", key: "6" },
 ];
 
-/** 运行平台（WebView 下 userAgent 可靠：Tauri/uTools 均基于系统 WebView）。 */
+export function visibleCategories(guiSupported: boolean, networkSupported: boolean): Category[] {
+  return ALL_CATEGORIES
+    .filter((category) => category.id !== "gui" || guiSupported)
+    .filter((category) => category.id !== "net" || networkSupported)
+    .map((category, index) => ({ ...category, key: String(index + 1) }));
+}
+
+/** 采集失败返回 null，调用方不得将 unknown 当成“没有窗口”。 */
+export function rowsForGuiSnapshot(rows: AppRow[], snapshot: GuiSnapshot): AppRow[] | null {
+  if (snapshot.status !== "supported") return null;
+  const pids = new Set(snapshot.pids);
+  return rows.filter((row) => (row.allPids || [row.pid]).some((pid) => pids.has(pid)));
+}
+
+/** 静态全量仅供类型/恢复校验；界面实际渲染必须使用 visibleCategories。 */
+export const CATEGORIES = ALL_CATEGORIES;
+
+export function restoreCategory(value: string | null, visible = CATEGORIES): Category["id"] {
+  return visible.some((category) => category.id === value) ? value as Category["id"] : "all";
+}
+
+export function restoreQuery(value: string | null): string {
+  return (value ?? "").slice(0, 200);
+}
+
+/** 默认无选中；第一次向下/向上分别进入首项/末项。 */
+export function moveSelection(current: number, direction: -1 | 1, length: number): number {
+  if (length <= 0) return -1;
+  if (current < 0) return direction > 0 ? 0 : length - 1;
+  return Math.max(0, Math.min(length - 1, current + direction));
+}
+
+/** 选择身份绑定进程组与其安全快照；成员变化时旧选择自动失效。 */
+export function processSelectionKey(row: Pick<AppRow, "id" | "snapshotToken">): string {
+  return `${row.id}\u0000${row.snapshotToken}`;
+}
+
+export function reconcileSelectionKey(selectedKey: string | null, rows: AppRow[], fallbackIndex = 0): string | null {
+  if (rows.length === 0) return null;
+  if (selectedKey && rows.some((row) => processSelectionKey(row) === selectedKey)) return selectedKey;
+  const index = Math.max(0, Math.min(rows.length - 1, fallbackIndex));
+  return processSelectionKey(rows[index]);
+}
+
+export type EnterTarget = "list" | "search" | "interactive";
+export function shouldOpenKillDialog(key: string, target: EnterTarget, dialogOpen: boolean): boolean {
+  return !dialogOpen && key === "Enter" && (target === "list" || target === "search");
+}
+
+export interface CenterScrollInput {
+  scrollTop: number;
+  clientHeight: number;
+  scrollHeight: number;
+  rowTop: number;
+  rowHeight: number;
+  direction: -1 | 1;
+}
+
+/** 只有选中行中心越过可视中线才跟随，目标值按内容边界 clamp。 */
+export function centeredSelectionScroll(input: CenterScrollInput): number {
+  const { scrollTop, clientHeight, scrollHeight, rowTop, rowHeight, direction } = input;
+  const rowCenter = rowTop + rowHeight / 2;
+  const viewportCenter = scrollTop + clientHeight / 2;
+  const crossed = direction > 0 ? rowCenter > viewportCenter : rowCenter < viewportCenter;
+  if (!crossed) return scrollTop;
+  return Math.max(0, Math.min(Math.max(0, scrollHeight - clientHeight), rowCenter - clientHeight / 2));
+}
+
+/** 全局列表快捷键必须避让原生交互元素。 */
+export function isInteractiveKeyboardTag(tagName: string, contentEditable = false): boolean {
+  if (contentEditable) return true;
+  return ["INPUT", "TEXTAREA", "SELECT", "BUTTON", "A"].includes(tagName.toUpperCase());
+}
+
+export type SearchInputKeyAction = "native" | "clear" | "navigate";
+
+/** 搜索框仅把 Esc 与上下键交给列表，其余输入和光标键保持原生。 */
+export function searchInputKeyAction(key: string): SearchInputKeyAction {
+  if (key === "Escape") return "clear";
+  if (key === "ArrowDown" || key === "ArrowUp") return "navigate";
+  return "native";
+}
+
+export type ProcessSortKey = "mem" | "cpu" | "procs" | "name";
+export type ProcessSortDir = "asc" | "desc";
+
+export function sortProcessRows(
+  rows: AppRow[],
+  key: ProcessSortKey,
+  direction: ProcessSortDir,
+): AppRow[] {
+  return [...rows].sort((a, b) => {
+    const compared = key === "name"
+      ? a.name.localeCompare(b.name)
+      : ((a[key] as number) || 0) - ((b[key] as number) || 0);
+    return direction === "asc" ? compared : -compared;
+  });
+}
+
+/** 运行平台，用于显示当前系统对应的修饰键。 */
 export type Platform = "mac" | "win" | "linux";
 
 export const platform: Platform = (() => {
@@ -34,6 +137,13 @@ export const fmtMem = (mb: number): string =>
 
 /** CPU 一位小数 + %。 */
 export const fmtCpu = (n: number): string => n.toFixed(1) + "%";
+
+export const fmtRate = (bytesPerSecond: number): string => {
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond < 0) return "—";
+  if (bytesPerSecond < 1024) return `${Math.round(bytesPerSecond)} B/s`;
+  if (bytesPerSecond < 1024 * 1024) return `${(bytesPerSecond / 1024).toFixed(bytesPerSecond < 10 * 1024 ? 1 : 0)} KB/s`;
+  return `${(bytesPerSecond / 1024 / 1024).toFixed(bytesPerSecond < 10 * 1024 * 1024 ? 1 : 0)} MB/s`;
+};
 
 export const sumCpu = (list: AppRow[]): number =>
   list.reduce((a, x) => a + x.cpu, 0);
@@ -138,31 +248,6 @@ export function fuzzyMatchRanges(text: string, query: string): [number, number][
     else merged.push([start, end]);
   }
   return merged;
-}
-
-/** 颜色加深，用于图标方块渐变。 */
-export function shade(hex: string, amt: number): string {
-  const n = parseInt(hex.slice(1), 16);
-  let r = (n >> 16) + amt,
-    g = ((n >> 8) & 255) + amt,
-    b = (n & 255) + amt;
-  r = Math.max(0, Math.min(255, r));
-  g = Math.max(0, Math.min(255, g));
-  b = Math.max(0, Math.min(255, b));
-  return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
-}
-
-// 一组稳定的品牌色盘，按名称哈希取色，保证同一应用每次同色。
-const PALETTE = [
-  "#4488F4", "#2C8FE0", "#A259FF", "#5A1F5C", "#2496ED",
-  "#1DB954", "#3A3A3A", "#2BB673", "#FA4D6A", "#26A2F0",
-  "#F5B544", "#3FB6C9", "#9B8CFF", "#F2555A", "#3DD68C",
-];
-
-export function colorFor(name: string): string {
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  return PALETTE[h % PALETTE.length];
 }
 
 /** 从应用名生成 1-2 字符字形。 */

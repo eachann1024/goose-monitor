@@ -1,15 +1,19 @@
-/* uTools bridge：调 preload.js 暴露的 window.services.*（Node child_process 实现）。
+/* uTools bridge：调 preload.js 暴露的 window.gooseMonitor.*（Node child_process 实现）。
    合并在 preload 侧完成。偏好用 utools.dbStorage 持久化。 */
 import type {
-  PlatformBridge, AppRow, CategoryId, SystemStats, KillResult,
+  PlatformBridge, AppRow, CategoryId, KillResult, Capability, GuiSnapshot, NetworkSnapshot, RuntimePlatform,
 } from "../types";
 
 declare global {
   interface Window {
-    services?: {
+    gooseMonitor?: {
       listProcesses(category: string): Promise<AppRow[]>;
-      systemStats(): Promise<SystemStats>;
       killProcess(id: string, snapshotToken: string, pids: number[]): Promise<KillResult>;
+      getRuntimePlatform(): RuntimePlatform;
+      getGuiCapability(): Promise<Capability>;
+      getGuiSnapshot(): Promise<GuiSnapshot>;
+      getNetworkCapability(): Promise<Capability>;
+      getNetworkSnapshot(): Promise<NetworkSnapshot>;
     };
     utools?: { isDarkColors?: () => boolean; dbStorage?: { getItem(k: string): unknown; setItem(k: string, v: string): void } };
   }
@@ -17,18 +21,20 @@ declare global {
 
 export class UtoolsBridge implements PlatformBridge {
   readonly name = "utools" as const;
+  readonly runtimePlatform = window.gooseMonitor!.getRuntimePlatform();
+
+  getGuiCapability(): Promise<Capability> { return window.gooseMonitor!.getGuiCapability(); }
+  getGuiSnapshot(): Promise<GuiSnapshot> { return window.gooseMonitor!.getGuiSnapshot(); }
+  getNetworkCapability(): Promise<Capability> { return window.gooseMonitor!.getNetworkCapability(); }
+  getNetworkSnapshot(): Promise<NetworkSnapshot> { return window.gooseMonitor!.getNetworkSnapshot(); }
 
   async listProcesses(category: CategoryId): Promise<AppRow[]> {
-    return (await window.services!.listProcesses(category)) as AppRow[];
-  }
-
-  async systemStats(): Promise<SystemStats> {
-    return (await window.services!.systemStats()) as SystemStats;
+    return (await window.gooseMonitor!.listProcesses(category)) as AppRow[];
   }
 
   async killProcess(row: AppRow): Promise<KillResult> {
     const pids = row.allPids && row.allPids.length ? row.allPids : [row.pid];
-    return (await window.services!.killProcess(row.id, row.snapshotToken, pids)) as KillResult;
+    return (await window.gooseMonitor!.killProcess(row.id, row.snapshotToken, pids)) as KillResult;
   }
 
   getPref(key: string): string | null {

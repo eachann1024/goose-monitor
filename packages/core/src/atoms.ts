@@ -1,12 +1,21 @@
 /* UI 原子：AppIcon / Meter / Kbd —— 内联 style 像素级复刻设计稿 shared.jsx。 */
 import type { AppRow } from "./types";
-import { fuzzyMatchRanges, shade } from "./shared";
+import { fuzzyMatchRanges } from "./shared";
 import { icon } from "./icons";
 
-/** 应用图标：优先真实图标 data URL，否则品牌色字形方块（带顶部高光）。 */
+export type AppIconKind = "real" | "system" | "application";
+
+/** 真实图标优先；缺失时将系统来源与普通应用明确区分。 */
+export function appIconKind(app: AppRow): AppIconKind {
+  if (app.iconUrl) return "real";
+  return app.systemOwned || app.sys ? "system" : "application";
+}
+
+/** 应用图标：优先真实图标，否则使用统一的系统/通用应用 SVG。 */
 export function appIcon(app: AppRow, size = 28, radius?: number): HTMLElement {
   const r = radius != null ? radius : Math.round(size * 0.26);
   const el = document.createElement("span");
+  el.className = "pk-app-icon";
   Object.assign(el.style, {
     width: `${size}px`,
     height: `${size}px`,
@@ -18,9 +27,11 @@ export function appIcon(app: AppRow, size = 28, radius?: number): HTMLElement {
     overflow: "hidden",
   } as Partial<CSSStyleDeclaration>);
 
-  if (app.iconUrl) {
+  const kind = appIconKind(app);
+  el.setAttribute("data-icon-kind", kind);
+  if (kind === "real") {
     const img = document.createElement("img");
-    img.src = app.iconUrl;
+    img.src = app.iconUrl!;
     img.alt = app.name;
     Object.assign(img.style, {
       width: "100%", height: "100%", objectFit: "cover", display: "block",
@@ -29,16 +40,15 @@ export function appIcon(app: AppRow, size = 28, radius?: number): HTMLElement {
     return el;
   }
 
+  const isSystem = kind === "system";
   Object.assign(el.style, {
-    background: `linear-gradient(160deg, ${app.color} 0%, ${shade(app.color, -18)} 100%)`,
-    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.25), 0 1px 2px rgba(0,0,0,0.35)",
-    color: "#fff",
-    fontFamily: "var(--font-sans)",
-    fontWeight: "700",
-    fontSize: `${size * 0.44}px`,
-    letterSpacing: "-0.02em",
+    background: isSystem ? "var(--fg-1)" : "var(--bg-elev)",
+    border: `1px solid ${isSystem ? "var(--fg-1)" : "var(--border-2)"}`,
+    color: isSystem ? "var(--bg-app)" : "var(--fg-2)",
   } as Partial<CSSStyleDeclaration>);
-  el.textContent = app.monogram;
+  el.title = isSystem ? "系统应用或进程" : "应用或进程";
+  el.setAttribute("aria-hidden", "true");
+  el.appendChild(icon(isSystem ? "settings" : "app-window", Math.max(12, Math.round(size * 0.62))));
   return el;
 }
 
@@ -137,7 +147,7 @@ export function enterKey(wide = false, className?: string): HTMLElement {
   el.appendChild(icon("corner-down-left", 12));
   return el;
 }
-/** 修饰键 + 回车图标（如 ⌘↵），用于托盘底栏等。 */
+/** 修饰键 + 回车图标（如 ⌘↵）。 */
 export function enterKeyMod(modLabel: string): HTMLElement {
   const el = document.createElement("span");
   Object.assign(el.style, {

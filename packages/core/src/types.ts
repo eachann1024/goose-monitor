@@ -19,10 +19,8 @@ export interface AppRow {
   snapshotToken: string;
   /** 显示名（应用名或进程名）。 */
   name: string;
-  /** 字母字形（图标占位用，1-2 字符）。 */
+  /** 兼容旧桥接的短标签；界面不再将它作为图标占位显示。 */
   monogram: string;
-  /** 品牌色（图标方块底色）。 */
-  color: string;
   /** 合并后的进程总数。 */
   procs: number;
   /** 合并后 CPU 总和（%）。 */
@@ -37,34 +35,21 @@ export interface AppRow {
   helpers: Helper[];
   /** 系统/后台进程（图标更小、圆角更小）。 */
   sys?: boolean;
-  /** 监听端口（网络分类用）。 */
-  port?: string;
+  /** 来自系统目录的应用或进程；真实图标缺失时使用独立系统图标。 */
+  systemOwned?: boolean;
   /** 真实图标 data URL（运行时由后端提供，可选）。 */
   iconUrl?: string;
   /** 合并组下所有 PID，kill 时需要。 */
   allPids?: number[];
-  /** 连续低占用（CPU<1%）累计分钟数，供菜单栏「自动清理」判断空闲时长。 */
-  idleMinutes?: number;
-  /** 后端保守判定为可参与自动清理的真实 GUI 应用。 */
-  autoCleanEligible?: boolean;
 }
 
-export type CategoryId = "gui" | "all" | "cpu" | "mem" | "net" | "bg";
+export type CategoryId = "all" | "gui" | "cpu" | "mem" | "net" | "bg";
 
 export interface Category {
   id: CategoryId;
   label: string;
   icon: string;
   key: string; // ⌘<key>
-}
-
-export interface SystemStats {
-  /** 全局 CPU 占用百分比（0-100，已按核数归一）。 */
-  cpuPercent: number;
-  /** 已用内存 MB。 */
-  memUsedMb: number;
-  /** 总内存 MB。 */
-  memTotalMb: number;
 }
 
 export interface KillResult {
@@ -74,17 +59,50 @@ export interface KillResult {
   error?: string;
 }
 
-/** 平台桥接接口 —— Tauri / uTools / 浏览器各自实现。 */
+export type CapabilityStatus = "supported" | "unsupported" | "unavailable";
+export interface Capability {
+  status: CapabilityStatus;
+  error?: string;
+}
+
+export interface GuiSnapshot {
+  status: "supported" | "error";
+  sampledAt: number;
+  pids: number[];
+  error?: string;
+}
+
+export interface NetworkAppUsage {
+  app: AppRow;
+  activePids: number[];
+  downloadBps: number;
+  uploadBps: number;
+}
+
+export interface NetworkSnapshot {
+  status: "supported" | "error";
+  sampledAt: number;
+  windowMs?: number;
+  apps: NetworkAppUsage[];
+  error?: string;
+}
+
+export type RuntimePlatform = "mac" | "win" | "linux";
+
+/** uTools 宿主与浏览器开发 mock 共用的界面契约。 */
 export interface PlatformBridge {
   /** 平台名，用于调试与降级提示。 */
-  readonly name: "tauri" | "utools" | "browser";
+  readonly name: "utools" | "browser";
+  readonly runtimePlatform: RuntimePlatform;
+  getGuiCapability(): Promise<Capability>;
+  getGuiSnapshot(): Promise<GuiSnapshot>;
+  getNetworkCapability(): Promise<Capability>;
+  getNetworkSnapshot(): Promise<NetworkSnapshot>;
   /** 列出某分类下的进程组（已做 Helper 合并）。 */
   listProcesses(category: CategoryId): Promise<AppRow[]>;
-  /** 系统整体资源占用（侧栏底部用）。 */
-  systemStats(): Promise<SystemStats>;
   /** 结束一个进程组（含其所有子进程）。 */
   killProcess(row: AppRow): Promise<KillResult>;
-  /** 持久化「以后不再提醒」偏好。 */
+  /** 持久化界面偏好。 */
   getPref(key: string): string | null;
   setPref(key: string, value: string): void;
 }

@@ -1,153 +1,139 @@
-/* =====================================================================
-   鹅的监控 · goose-monitor — Foundations
-   重新换肤为「鹅的运行 · goose-run」设计系统(Claude 暖极简风格):
-   暖米纸画布 · 陶土红(clay/coral)单一强调色 · AI 紫专属身份色 ·
-   衬线标题(Newsreader + Noto Serif SC)+ 原生系统无衬线正文。
-   —— Token 名沿用原 ProcKill 体系,数值映射到 goose-run,实现整套换肤。
-   Load this file, then set data-theme="dark" (default) or "light" on <html>.
-   ===================================================================== */
-
-/* ---- Webfonts (CDN) ----------------------------------------------------
-   衬线显示体: Newsreader (Latin) + Noto Serif SC (CJK) — 标题/弹窗标题用。
-   正文/控件: 原生系统无衬线(PingFang SC / Microsoft YaHei),不再用 IBM Plex Sans。
-   数据/PID/路径: 原生等宽(SF Mono / JetBrains Mono),tabular-nums。
-   <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400..700&family=Noto+Serif+SC:wght@400..700&display=swap" rel="stylesheet">
------------------------------------------------------------------------- */
-
 :root {
-  /* Type families — Claude 风格:衬线显示体 + 原生系统无衬线 */
   --font-serif: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
     "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
     "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 
-  /* Type scale — APP UI (800px window). 标题/弹窗标题用衬线,其余原生无衬线。 */
-  --t-title:  600 18px/24px var(--font-serif);   /* view title (衬线)      */
-  --t-lg:     600 16px/22px var(--font-serif);   /* dialog heading (衬线)  */
-  --t-row:    450 13.5px/18px var(--font-sans);  /* app / process name    */
-  --t-base:   400 13px/18px var(--font-sans);    /* body                  */
-  --t-sm:     400 12px/16px var(--font-sans);    /* secondary             */
-  --t-xs:     400 11px/14px var(--font-sans);    /* captions, hints       */
-  --t-label:  600 10.5px/12px var(--font-sans);  /* section/eyebrow labels */
-  --t-mono:   500 12.5px/16px var(--font-mono);  /* metrics, PID, numbers */
-  --t-mono-sm:400 11px/14px var(--font-mono);    /* paths                 */
+  --t-title: 600 18px/24px var(--font-serif);
+  --t-lg: 600 16px/22px var(--font-serif);
+  --t-row: 450 13.5px/18px var(--font-sans);
+  --t-base: 400 13px/18px var(--font-sans);
+  --t-sm: 400 12px/16px var(--font-sans);
+  --t-xs: 400 11px/14px var(--font-sans);
+  --t-label: 600 10.5px/12px var(--font-sans);
+  --t-mono: 500 12.5px/16px var(--font-mono);
+  --t-mono-sm: 400 11px/14px var(--font-mono);
   --label-tracking: 0.07em;
 
-  /* Radii — goose-run base 14px(cell),按钮 ~11px */
-  --r-window: 14px;
-  --r-lg: 11px;
-  --r-md: 9px;
-  --r-sm: 7px;
-  --r-xs: 5px;
+  --r-window: 12px;
+  --r-lg: 10px;
+  --r-md: 8px;
+  --r-sm: 6px;
+  --r-xs: 4px;
   --r-pill: 999px;
 
-  /* Spacing (4pt base) */
-  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
-  --sp-5: 20px; --sp-6: 24px; --sp-8: 32px; --sp-10: 40px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
 
-  /* Metric category hues (data viz) — 暖化后仍可区分 */
-  --metric-cpu: #d9920a;      /* amber  */
-  --metric-mem: #7c52e0;      /* AI 紫  */
-  --metric-net: #2c92a4;      /* teal   */
-  --metric-disk:#2f6ad9;      /* blue   */
+  --metric-cpu: #a3a3a3;
+  --metric-mem: #8a8a8a;
+  --metric-net: #969696;
+  --metric-disk: #7d7d7d;
 }
 
-/* ----------------------------- DARK (default) -------------------------
-   Claude 风格深色:中性暖炭灰(非棕),低彩度,让陶土红与紫色突出。 */
 [data-theme="dark"] {
-  --bg-app:       #262624;    /* window backdrop / app shell        */
-  --bg-sidebar:   #2c2c2a;
-  --bg-panel:     #262624;    /* main content surface               */
-  --bg-elev:      #30302e;    /* cards, popovers, menus (surface)   */
-  --bg-input:     #21211f;
-  --bg-row-hover: rgba(255,255,255,0.045);
-  --bg-row-sel:   rgba(224,135,95,0.16);
-  --bg-track:     rgba(255,255,255,0.08);   /* meter track          */
+  --bg-app: #090909;
+  --bg-sidebar: #101010;
+  --bg-panel: #0b0b0b;
+  --bg-elev: #181818;
+  --bg-input: #141414;
+  --bg-row-hover: #151515;
+  --bg-row-sel: #1c1c1c;
+  --bg-track: #292929;
 
-  --border-1: rgba(255,255,255,0.07);
-  --border-2: rgba(255,255,255,0.11);
-  --border-strong: #3e3e3a;
+  --border-1: #242424;
+  --border-2: #343434;
+  --border-strong: #454545;
 
-  --fg-1: #faf9f5;
-  --fg-2: #b7b5ad;
-  --fg-3: #aaa79f;
-  --fg-on-accent: #ffffff;
+  --fg-1: #f5f5f5;
+  --fg-2: #b5b5b5;
+  --fg-3: #858585;
+  --fg-on-accent: #090909;
 
-  --accent:        #e0875f;   /* coral brighter for dark            */
-  --accent-hover:  #ea9670;   /* hover = LIGHTER in dark mode       */
-  --accent-subtle: #3a2a22;
+  --accent: #f5f5f5;
+  --accent-hover: #ffffff;
+  --accent-subtle: #202020;
 
-  --ai:        #a78bfa;
-  --ai-bright: #d9bdf6;
-  --ai-subtle: #2c2640;
+  --ai: #a3a3a3;
+  --ai-bright: #d4d4d4;
+  --ai-subtle: #202020;
 
-  --danger:    #d15c56;
-  --danger-bg: rgba(209,92,86,0.16);
-  --danger-fg: #ef9a8f;
-  --danger-border: #75413e;
-  --danger-hover: #55302d;
-  --ok:        #22c55e;
-  --ok-bg:     rgba(34,197,94,0.14);
+  --danger: #c65a55;
+  --danger-bg: rgba(198, 90, 85, 0.14);
+  --danger-fg: #e48b86;
+  --danger-border: #6d3936;
+  --danger-hover: #3b2220;
+  --ok: #d4d4d4;
+  --ok-bg: #202020;
 
-  --shadow-card: 0 1px 2px rgba(0,0,0,0.30);
-  --shadow-pop:  0 8px 28px -8px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.35);
-  --shadow-window: 0 24px 70px rgba(0,0,0,0.50), 0 0 0 1px rgba(255,255,255,0.04);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --shadow-pop: 0 8px 28px -8px rgba(0, 0, 0, 0.64), 0 2px 8px rgba(0, 0, 0, 0.38);
+  --shadow-window: 0 24px 70px rgba(0, 0, 0, 0.58), 0 0 0 1px #242424;
 }
 
-/* ----------------------------- LIGHT -----------------------------------
-   goose-run 招牌外观:暖米纸画布,陶土红强调,靠 1px 细描边而非阴影定义卡片。 */
 [data-theme="light"] {
-  --bg-app:       #e9e7dd;    /* backdrop behind window — 略深于纸面  */
-  --bg-sidebar:   #f0eee6;    /* warm cream (surface)               */
-  --bg-panel:     #faf9f5;    /* warm ivory paper (bg)              */
-  --bg-elev:      #f0eee6;    /* cards / popovers (surface)         */
-  --bg-input:     #ffffff;    /* crisp white fields                 */
-  --bg-row-hover: rgba(30,20,10,0.040);
-  --bg-row-sel:   #f3e7e0;     /* accent-subtle                      */
-  --bg-track:     rgba(31,30,29,0.08);
+  --bg-app: #e7e7e7;
+  --bg-sidebar: #f1f1f1;
+  --bg-panel: #fafafa;
+  --bg-elev: #f0f0f0;
+  --bg-input: #ffffff;
+  --bg-row-hover: #f1f1f1;
+  --bg-row-sel: #ebebeb;
+  --bg-track: #dddddd;
 
-  --border-1: #e6e3d9;        /* warm hairline                      */
-  --border-2: #ddd9cc;
-  --border-strong: #d3cebf;
+  --border-1: #dddddd;
+  --border-2: #cfcfcf;
+  --border-strong: #bdbdbd;
 
-  --fg-1: #1f1e1d;            /* Claude warm ink                    */
-  --fg-2: #6c6b64;
-  --fg-3: #6f6d66;
+  --fg-1: #171717;
+  --fg-2: #5f5f5f;
+  --fg-3: #777777;
   --fg-on-accent: #ffffff;
 
-  --accent:        #d97757;
-  --accent-hover:  #c25f3c;
-  --accent-subtle: #f3e7e0;
+  --accent: #171717;
+  --accent-hover: #000000;
+  --accent-subtle: #e8e8e8;
 
-  --ai:        #7c52e0;
-  --ai-bright: #c8a2f0;
-  --ai-subtle: #f1eaff;
+  --ai: #666666;
+  --ai-bright: #888888;
+  --ai-subtle: #e8e8e8;
 
-  --danger:    #b54a3f;
-  --danger-bg: rgba(181,74,63,0.10);
-  --danger-fg: #b54a3f;
-  --danger-border: #d7aaa5;
-  --danger-hover: #efd7d4;
-  --ok:        #187c49;
-  --ok-bg:     rgba(24,124,73,0.12);
+  --danger: #a8413c;
+  --danger-bg: rgba(168, 65, 60, 0.09);
+  --danger-fg: #a8413c;
+  --danger-border: #d0a19e;
+  --danger-hover: #edd9d8;
+  --ok: #4a4a4a;
+  --ok-bg: #e8e8e8;
 
-  --shadow-card: 0 1px 2px rgba(25,15,9,0.05);
-  --shadow-pop:  0 8px 28px -8px rgba(25,15,9,0.18), 0 2px 8px rgba(25,15,9,0.08);
-  --shadow-window: 0 24px 70px rgba(25,15,9,0.16), 0 0 0 1px rgba(31,30,29,0.06);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-pop: 0 8px 28px -8px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.09);
+  --shadow-window: 0 24px 70px rgba(0, 0, 0, 0.18), 0 0 0 1px #d5d5d5;
 }
 
-/* --------------------------- Semantic helpers ------------------------- */
-.t-title  { font: var(--t-title);  color: var(--fg-1); }
-.t-lg     { font: var(--t-lg);     color: var(--fg-1); }
-.t-row    { font: var(--t-row);    color: var(--fg-1); }
-.t-base   { font: var(--t-base);   color: var(--fg-1); }
-.t-sm     { font: var(--t-sm);     color: var(--fg-2); }
-.t-xs     { font: var(--t-xs);     color: var(--fg-3); }
-.t-mono   { font: var(--t-mono);   color: var(--fg-1); font-variant-numeric: tabular-nums; }
-.t-path   { font: var(--t-mono-sm);color: var(--fg-3); }
-.t-label  {
-  font: var(--t-label); color: var(--fg-3);
-  text-transform: uppercase; letter-spacing: var(--label-tracking);
+.t-title { font: var(--t-title); color: var(--fg-1); }
+.t-lg { font: var(--t-lg); color: var(--fg-1); }
+.t-row { font: var(--t-row); color: var(--fg-1); }
+.t-base { font: var(--t-base); color: var(--fg-1); }
+.t-sm { font: var(--t-sm); color: var(--fg-2); }
+.t-xs { font: var(--t-xs); color: var(--fg-3); }
+.t-mono {
+  font: var(--t-mono);
+  color: var(--fg-1);
+  font-variant-numeric: tabular-nums;
+}
+.t-path { font: var(--t-mono-sm); color: var(--fg-3); }
+.t-label {
+  font: var(--t-label);
+  color: var(--fg-3);
+  text-transform: uppercase;
+  letter-spacing: var(--label-tracking);
 }
 .num { font-variant-numeric: tabular-nums; }
