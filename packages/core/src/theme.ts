@@ -1,4 +1,4 @@
-/** 外观偏好与 data-theme 同步（主窗 / 托盘共用）。pk_theme：auto | light | dark */
+/** 外观偏好与 data-theme 同步。pk_theme：auto | light | dark */
 
 export const THEME_PREF_KEY = "pk_theme";
 
@@ -42,24 +42,6 @@ export function resolveThemeState(
 ): { theme: UiTheme; themePref: ThemePref } {
   const themePref = parseThemePref(saved);
   return { themePref, theme: resolveEffectiveTheme(themePref, followUtools) };
-}
-
-export function cycleThemePref(current: ThemePref): ThemePref {
-  if (current === "auto") return "light";
-  if (current === "light") return "dark";
-  return "auto";
-}
-
-export function themeIconForPref(pref: ThemePref): "monitor" | "sun" | "moon" {
-  if (pref === "auto") return "monitor";
-  if (pref === "light") return "sun";
-  return "moon";
-}
-
-export function themeButtonTitle(pref: ThemePref): string {
-  if (pref === "auto") return "外观：跟随电脑（点击切换）";
-  if (pref === "light") return "外观：浅色（点击切换）";
-  return "外观：深色（点击切换）";
 }
 
 export function applyDataTheme(theme: UiTheme, extraEls?: HTMLElement[]): void {

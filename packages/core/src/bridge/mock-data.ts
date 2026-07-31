@@ -8,15 +8,15 @@ import type { AppRow, CategoryId, Helper } from "../types";
 
 // 每个进程的基线（围绕它游走），以及当前值。基线让数值长期稳定、不漂走。
 interface Seed {
-  id: string; name: string; monogram: string; color: string;
-  pid: number; path: string; sys?: boolean; port?: string;
+  id: string; name: string; monogram: string;
+  pid: number; path: string; sys?: boolean; systemOwned?: boolean; visible?: boolean;
   cpuBase: number; memBase: number;
   helpers: Array<{ name: string; role: string; pid: number; cpuBase: number; memBase: number }>;
 }
 
 const APP_SEEDS: Seed[] = [
   {
-    id: "chrome", name: "Google Chrome", monogram: "C", color: "#4488F4",
+    id: "chrome", name: "Google Chrome", monogram: "C", visible: true,
     pid: 1287, path: "/Applications/Google Chrome.app", cpuBase: 23.4, memBase: 2470,
     helpers: [
       { name: "Google Chrome", role: "主进程", pid: 1287, cpuBase: 4.2, memBase: 412 },
@@ -26,7 +26,7 @@ const APP_SEEDS: Seed[] = [
     ],
   },
   {
-    id: "code", name: "Visual Studio Code", monogram: "VS", color: "#2C8FE0",
+    id: "code", name: "Visual Studio Code", monogram: "VS", visible: true,
     pid: 980, path: "/Applications/Visual Studio Code.app", cpuBase: 11.2, memBase: 1180,
     helpers: [
       { name: "Code", role: "主进程", pid: 980, cpuBase: 2.1, memBase: 260 },
@@ -35,26 +35,26 @@ const APP_SEEDS: Seed[] = [
       { name: "Code Helper (GPU)", role: "GPU", pid: 1010, cpuBase: 0.8, memBase: 80 },
     ],
   },
-  { id: "figma", name: "Figma", monogram: "Fg", color: "#A259FF", pid: 1455, path: "/Applications/Figma.app", cpuBase: 6.8, memBase: 1040, helpers: [] },
-  { id: "wechat", name: "微信", monogram: "微", color: "#2DC100", pid: 1500, path: "/Applications/WeChat.app", cpuBase: 1.8, memBase: 884, helpers: [] },
-  { id: "slack", name: "Slack", monogram: "Sl", color: "#5A1F5C", pid: 1622, path: "/Applications/Slack.app", cpuBase: 4.1, memBase: 845, helpers: [] },
-  { id: "qq", name: "QQ", monogram: "Q", color: "#12B7F5", pid: 1700, path: "/Applications/QQ.app", cpuBase: 1.1, memBase: 562, helpers: [] },
-  { id: "docker", name: "Docker Desktop", monogram: "Dk", color: "#2496ED", pid: 760, path: "/Applications/Docker.app", cpuBase: 8.9, memBase: 1640, helpers: [] },
-  { id: "netease", name: "网易云音乐", monogram: "云", color: "#C20C0C", pid: 1950, path: "/Applications/NeteaseMusic.app", cpuBase: 0.9, memBase: 430, helpers: [] },
-  { id: "spotify", name: "Spotify", monogram: "Sp", color: "#1DB954", pid: 2010, path: "/Applications/Spotify.app", cpuBase: 1.2, memBase: 412, helpers: [] },
-  { id: "notion", name: "Notion", monogram: "N", color: "#3A3A3A", pid: 1890, path: "/Applications/Notion.app", cpuBase: 2.0, memBase: 690, helpers: [] },
-  { id: "iterm", name: "iTerm2", monogram: "iT", color: "#2BB673", pid: 540, path: "/Applications/iTerm.app", cpuBase: 2.3, memBase: 230, helpers: [] },
-  { id: "music", name: "Music", monogram: "M", color: "#FA4D6A", pid: 2240, path: "/System/Applications/Music.app", cpuBase: 0.6, memBase: 318, helpers: [] },
-  { id: "finder", name: "Finder", monogram: "Fi", color: "#26A2F0", pid: 312, path: "/System/Library/CoreServices/Finder.app", cpuBase: 0.4, memBase: 180, helpers: [] },
+  { id: "figma", name: "Figma", monogram: "Fg", pid: 1455, path: "/Applications/Figma.app", visible: true, cpuBase: 6.8, memBase: 1040, helpers: [] },
+  { id: "wechat", name: "微信", monogram: "微", pid: 1500, path: "/Applications/WeChat.app", visible: true, cpuBase: 1.8, memBase: 884, helpers: [] },
+  { id: "slack", name: "Slack", monogram: "Sl", pid: 1622, path: "/Applications/Slack.app", cpuBase: 4.1, memBase: 845, helpers: [] },
+  { id: "qq", name: "QQ", monogram: "Q", pid: 1700, path: "/Applications/QQ.app", cpuBase: 1.1, memBase: 562, helpers: [] },
+  { id: "docker", name: "Docker Desktop", monogram: "Dk", pid: 760, path: "/Applications/Docker.app", cpuBase: 8.9, memBase: 1640, helpers: [] },
+  { id: "netease", name: "网易云音乐", monogram: "云", pid: 1950, path: "/Applications/NeteaseMusic.app", cpuBase: 0.9, memBase: 430, helpers: [] },
+  { id: "spotify", name: "Spotify", monogram: "Sp", pid: 2010, path: "/Applications/Spotify.app", cpuBase: 1.2, memBase: 412, helpers: [] },
+  { id: "notion", name: "Notion", monogram: "N", pid: 1890, path: "/Applications/Notion.app", cpuBase: 2.0, memBase: 690, helpers: [] },
+  { id: "iterm", name: "iTerm2", monogram: "iT", pid: 540, path: "/Applications/iTerm.app", cpuBase: 2.3, memBase: 230, helpers: [] },
+  { id: "music", name: "Music", monogram: "M", pid: 2240, path: "/System/Applications/Music.app", systemOwned: true, cpuBase: 0.6, memBase: 318, helpers: [] },
+  { id: "finder", name: "Finder", monogram: "Fi", pid: 312, path: "/System/Library/CoreServices/Finder.app", systemOwned: true, cpuBase: 0.4, memBase: 180, helpers: [] },
 ];
 
 const SYS_SEEDS: Seed[] = [
-  { id: "kernel", name: "kernel_task", monogram: "K", color: "#6B7280", pid: 0, path: "/System", sys: true, cpuBase: 6.4, memBase: 1820, helpers: [] },
-  { id: "wsd", name: "WindowServer", monogram: "W", color: "#3B82F6", pid: 142, path: "/System/Library/.../WindowServer", sys: true, cpuBase: 5.1, memBase: 980, helpers: [] },
-  { id: "mds", name: "mds_stores", monogram: "m", color: "#6B7280", pid: 388, path: "/System/Library/.../mds_stores", sys: true, cpuBase: 1.8, memBase: 240, helpers: [] },
-  { id: "node", name: "node (vite)", monogram: "nd", color: "#3DA639", pid: 4821, path: "~/dev/app/node_modules/.bin/vite", sys: true, cpuBase: 3.2, memBase: 410, port: "5173", helpers: [] },
-  { id: "pg", name: "postgres", monogram: "Pg", color: "#31648C", pid: 690, path: "/opt/homebrew/.../postgres", sys: true, cpuBase: 0.7, memBase: 256, port: "5432", helpers: [] },
-  { id: "ssh", name: "sshd", monogram: "ss", color: "#6B7280", pid: 901, path: "/usr/sbin/sshd", sys: true, cpuBase: 0.1, memBase: 36, port: "22", helpers: [] },
+  { id: "kernel", name: "kernel_task", monogram: "K", pid: 0, path: "/System", sys: true, cpuBase: 6.4, memBase: 1820, helpers: [] },
+  { id: "wsd", name: "WindowServer", monogram: "W", pid: 142, path: "/System/Library/.../WindowServer", sys: true, cpuBase: 5.1, memBase: 980, helpers: [] },
+  { id: "mds", name: "mds_stores", monogram: "m", pid: 388, path: "/System/Library/.../mds_stores", sys: true, cpuBase: 1.8, memBase: 240, helpers: [] },
+  { id: "node", name: "node (vite)", monogram: "nd", pid: 4821, path: "~/dev/app/node_modules/.bin/vite", sys: true, cpuBase: 3.2, memBase: 410, helpers: [] },
+  { id: "pg", name: "postgres", monogram: "Pg", pid: 690, path: "/opt/homebrew/.../postgres", sys: true, cpuBase: 0.7, memBase: 256, helpers: [] },
+  { id: "ssh", name: "sshd", monogram: "ss", pid: 901, path: "/usr/sbin/sshd", sys: true, cpuBase: 0.1, memBase: 36, helpers: [] },
 ];
 
 // 围绕基线的有界随机游走：cpu 抖动 ±35% 基线、内存 ±4%；非负、CPU 封顶 99。
@@ -62,24 +62,6 @@ function jitter(base: number, ratio: number, max: number): number {
   const delta = base * ratio * (Math.random() * 2 - 1);
   return Math.max(0, Math.min(max, base + delta));
 }
-
-// 固定 idle 映射表，贴近设计稿演示效果（阈值60分钟时 wechat/qq/spotify/notion 进"将自动退出"区）。
-// 命中 id 用固定值，命中不到再用旧逻辑兜底。
-const FIXED_IDLE: Record<string, number> = {
-  chrome: 1,
-  code: 0,
-  wechat: 96,
-  slack: 38,
-  qq: 71,
-  docker: 14,
-  figma: 27,
-  netease: 12,
-  spotify: 103,
-  notion: 52,
-  iterm: 6,
-  music: 44,
-  finder: 8,
-};
 
 function buildRow(seed: Seed): AppRow {
   const helpers: Helper[] = seed.helpers.map((h) => ({
@@ -95,19 +77,12 @@ function buildRow(seed: Seed): AppRow {
     ? helpers.reduce((a, h) => a + h.mem, 0)
     : Math.round(jitter(seed.memBase, 0.04, 1e9));
   const procs = helpers.length || 1;
-  // 空闲时长：优先查固定映射表（保证演示效果稳定），命中不到再用旧逻辑兜底。
-  // 真实环境由 Rust IdleTracker 提供，此处仅为浏览器预览用。
-  const idleMinutes = seed.id in FIXED_IDLE
-    ? FIXED_IDLE[seed.id]
-    : (cpu < 1 ? 35 + Math.round(Math.random() * 40) : 0);
   return {
     id: seed.id, identity: `mock:${seed.id}`, snapshotToken: `mock-snapshot:${seed.id}`,
-    name: seed.name, monogram: seed.monogram, color: seed.color,
+    name: seed.name, monogram: seed.monogram,
     procs, cpu, mem, pid: seed.pid, path: seed.path, helpers,
-    sys: seed.sys, port: seed.port,
+    sys: seed.sys, systemOwned: seed.systemOwned || seed.sys,
     allPids: [seed.pid, ...helpers.map((h) => h.pid)],
-    idleMinutes,
-    autoCleanEligible: !seed.sys && (seed.path.startsWith("/Applications/") || (seed.path.startsWith("/Users/") && seed.path.includes("/Applications/"))),
   };
 }
 
@@ -120,13 +95,32 @@ function snapshot(killed: Set<string>): { apps: AppRow[]; sys: AppRow[] } {
 }
 
 function pickCategory(cat: CategoryId, apps: AppRow[], sys: AppRow[]): AppRow[] {
-  if (cat === "gui") return apps;
   if (cat === "cpu") return [...apps, ...sys];
   if (cat === "mem") return [...apps, ...sys];
   if (cat === "all") return [...apps, ...sys];
-  if (cat === "net") return [...sys.filter((s) => s.port), ...apps.slice(0, 2)];
+  if (cat === "net" || cat === "gui") return apps;
   if (cat === "bg") return sys;
   return apps;
+}
+
+export function mockGuiPids(killed: Set<string>): number[] {
+  return APP_SEEDS.filter((seed) => seed.visible && !killed.has(seed.id)).map((seed) => seed.pid);
+}
+
+export function mockNetworkSnapshot(killed: Set<string>): import("../types").NetworkSnapshot {
+  const { apps, sys } = snapshot(killed);
+  const rows = [...apps, ...sys].slice(0, 6);
+  return {
+    status: "supported",
+    sampledAt: Date.now(),
+    windowMs: 1000,
+    apps: rows.map((app, index) => ({
+      app,
+      activePids: (app.allPids || [app.pid]).slice(0, 2),
+      downloadBps: index === 2 ? 0 : 920 + index * 184_320,
+      uploadBps: index === 4 ? 0 : 340 + index * 31_744,
+    })),
+  };
 }
 
 // 一次性生成「同一份快照」下的分类列表 + 系统资源，保证资源条与列表数据自洽

@@ -2,30 +2,37 @@
    kill 是"假关闭"（记入 killed 集合，后续快照不再包含），用于无原生后端时
    完整验证 UI / 键盘流 / 排序 / 搜索 / 不闪烁。 */
 import type {
-  PlatformBridge, AppRow, CategoryId, SystemStats, KillResult,
+  PlatformBridge, AppRow, CategoryId, KillResult, Capability, GuiSnapshot, NetworkSnapshot, RuntimePlatform,
 } from "../types";
-import { tickSnapshot } from "./mock-data";
+import { tickSnapshot, mockGuiPids, mockNetworkSnapshot } from "./mock-data";
 
 export class BrowserBridge implements PlatformBridge {
   readonly name = "browser" as const;
+  readonly runtimePlatform: RuntimePlatform;
   private killed = new Set<string>();
-  // 最近一次快照：listProcesses 推进它，systemStats 复用它，
-  // 保证同一刷新周期内「列表」与「系统资源条」来自同一份数据、求和自洽。
-  private lastTick: { cpu: number; memUsed: number } | null = null;
+  private params = new URLSearchParams(location.search);
 
-  async listProcesses(category: CategoryId): Promise<AppRow[]> {
-    const t = tickSnapshot(category, this.killed);
-    this.lastTick = { cpu: t.cpu, memUsed: t.memUsed };
-    return t.list;
+  constructor() {
+    const platform = this.params.get("platform");
+    this.runtimePlatform = platform === "win" || platform === "linux" ? platform : "mac";
   }
 
-  async systemStats(): Promise<SystemStats> {
-    // 复用最近一次 listProcesses 的快照；若尚未取过（首帧并发），现取一份。
-    const t = this.lastTick ?? (() => {
-      const s = tickSnapshot("all", this.killed);
-      return { cpu: s.cpu, memUsed: s.memUsed };
-    })();
-    return { cpuPercent: t.cpu, memUsedMb: t.memUsed, memTotalMb: 16384 };
+  async getGuiCapability(): Promise<Capability> {
+    return { status: this.params.get("gui") === "off" ? "unsupported" : "supported" };
+  }
+  async getGuiSnapshot(): Promise<GuiSnapshot> {
+    if ((await this.getGuiCapability()).status !== "supported") return { status: "error", sampledAt: Date.now(), pids: [], error: "界面分类不可用" };
+    return { status: "supported", sampledAt: Date.now(), pids: mockGuiPids(this.killed) };
+  }
+  async getNetworkCapability(): Promise<Capability> {
+    return { status: this.params.get("network") === "off" ? "unsupported" : "supported" };
+  }
+  async getNetworkSnapshot(): Promise<NetworkSnapshot> {
+    if ((await this.getNetworkCapability()).status !== "supported") return { status: "error", sampledAt: Date.now(), apps: [], error: "网络采样不可用" };
+    return mockNetworkSnapshot(this.killed);
+  }
+  async listProcesses(category: CategoryId): Promise<AppRow[]> {
+    return tickSnapshot(category === "gui" || category === "net" ? "all" : category, this.killed).list;
   }
 
   async killProcess(row: AppRow): Promise<KillResult> {

@@ -1,9 +1,13 @@
 /* ProcKill uTools preload —— 在 Node 环境实现进程枚举 / 合并 / kill。
-   暴露 window.services 给前端 bridge 调用。源码保持可读（uTools 审核要求，不混淆）。 */
+   暴露 window.gooseMonitor 给前端 bridge 调用。源码保持可读（uTools 审核要求，不混淆）。 */
 const { execSync, execFileSync, execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const os = require("node:os");
 const path = require("node:path");
+const { inferRole, linuxExecutableFromCommand, findExecutableTreeRootPid } = require("./process-role.cjs");
+const { QUERY_PREF_KEY, resolveEntryQuery } = require("./plugin-state.cjs");
+const { getVisibleWindowPids } = require("./window-provider.cjs");
+const { collectNettop, probeNettop, aggregateNetworkUsage } = require("./network-provider.cjs");
 
 const execFileAsync = promisify(execFile);
 
@@ -29,33 +33,12 @@ function shAsync(cmd, args, maxBuffer) {
   }).then((r) => r.stdout);
 }
 
-const PALETTE = [
-  "#4488F4", "#2C8FE0", "#A259FF", "#5A1F5C", "#2496ED", "#1DB954", "#3A3A3A", "#2BB673",
-  "#FA4D6A", "#26A2F0", "#F5B544", "#3FB6C9", "#9B8CFF", "#F2555A", "#3DD68C",
-];
-function colorFor(name) {
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  return PALETTE[h % PALETTE.length];
-}
 function monogramFor(name) {
   const cleaned = name.replace(/\.(app|exe)$/i, "").trim();
   const words = cleaned.split(/[\s\-_]+/).filter(Boolean);
   if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
   const w = words[0] || cleaned;
   return w.slice(0, w.length >= 2 ? 2 : 1);
-}
-function inferRole(procName, isMain) {
-  if (isMain) return "主进程";
-  const n = procName.toLowerCase();
-  if (n.includes("gpu")) return "GPU";
-  if (n.includes("renderer")) return "渲染进程";
-  if (n.includes("plugin") || n.includes("extension")) return "扩展宿主";
-  if (n.includes("network")) return "网络服务";
-  if (n.includes("crashpad") || n.includes("crash")) return "崩溃监控";
-  if (n.includes("utility")) return "工具进程";
-  if (n.includes("helper")) return "辅助进程";
-  return "子进程";
 }
 function appBundle(exe) {
   if (!exe) return null;
@@ -71,18 +54,17 @@ function isSystemPath(exe, name) {
   if (!exe) return true;
   if (name === "kernel_task") return true;
   if (IS_WIN) return /\\windows\\/i.test(exe) || /\\system32\\/i.test(exe);
-  // mac / linux 系统守护进程目录（与 src-tauri/src/process.rs is_system_path 对齐）
+  // mac / linux 系统守护进程目录
   return exe.startsWith("/usr/sbin/") || exe.startsWith("/usr/libexec/") ||
     exe.startsWith("/sbin/") || exe.startsWith("/System/") ||
     exe.startsWith("/Library/") || exe.startsWith("/lib/") || exe.startsWith("/bin/");
 }
 
-// 判断是否界面应用（与 src-tauri/src/process.rs is_gui 对齐）。
+// 判断进程路径是否属于图形应用。
 // 关键：macOS 大量系统守护进程也住在 .app bundle 内（如 XProtect、liquiddetectiond、
 // com.apple.* 的 XPC/扩展服务），但它们装在 /System/、/Library/、/usr/ 下，并非用户应用。
-// 仅凭 .app 子串匹配会把它们误判为界面应用 → 漏进 gui 列表。故系统/库目录下的 .app
-// 一律不算用户 GUI 应用。
-function isGui(exe) {
+// 仅凭 .app 子串匹配会把系统服务误判为用户应用，故系统/库目录下的 .app 不参与前台应用判定。
+function isGraphicalApp(exe) {
   if (!exe) return false;
   if (exe.includes(".app/") || exe.endsWith(".app")) {
     const inSystemDir = exe.startsWith("/System/") ||
@@ -94,7 +76,7 @@ function isGui(exe) {
     return low.includes("\\program files") ||
       (low.endsWith(".exe") && (low.includes("\\users\\") || low.includes("\\appdata\\")));
   }
-  // Linux 界面应用常见安装位置，排除工具链/CLI 常驻的 .../bin/ 目录。
+  // Linux 图形应用常见安装位置，排除工具链/CLI 常驻的 .../bin/ 目录。
   const isToolchain = exe.includes("/bin/") &&
     (exe.includes("homebrew") || exe.includes("/rh/") || exe.includes("/node") ||
      exe.includes("python") || exe.includes("ruby"));
@@ -103,7 +85,7 @@ function isGui(exe) {
     exe.includes("/.local/share/applications") || exe.includes("/usr/share/applications");
 }
 
-/* ---- 真实应用图标抓取（与 Tauri src-tauri/src/icon.rs 同源逻辑的 Node 版）----
+/* ---- 真实应用图标抓取 ----
    macOS：定位 .app bundle → 读 Info.plist 的 CFBundleIconFile（PlistBuddy）→ sips 转
           64×64 PNG → base64 data URL，交前端 <img> 显示真实图标；失败缓存 null 降级字形方块。
    Windows / Linux：暂未实现真实抓取，缓存 null 降级。
@@ -197,9 +179,7 @@ async function attachIcons(rows) {
 /* ---- 采集原始进程（异步，不阻塞事件循环）---- */
 async function rawProcsUnix() {
   // macOS 的 `-o comm=` 输出干净的完整可执行路径（含 .app/），单列即可。
-  // Linux 的 `comm` 截断成短名，所以额外取 `args`（完整命令行）拿路径：
-  //   name 用 comm（稳定短名），exe 用 args 整串（含路径，路径带空格也不丢，
-  //   因为 appBundle/is_gui 都是子串匹配，不依赖精确切分）。
+  // Linux 额外保留 args 供角色识别，但 exe 只取首个可执行路径，避免不同参数拆散同一进程树。
   if (IS_MAC) {
     const out = await shAsync("ps", ["-axwwo", "pid=,ppid=,pcpu=,rss=,lstart=,comm="], 32 * 1024 * 1024);
     const list = [];
@@ -210,6 +190,7 @@ async function rawProcsUnix() {
       list.push({
         pid: +m[1], ppid: +m[2], cpu: parseFloat(m[3]) || 0,
         memMb: (+m[4]) / 1024, startedAt: m[5], exe, name: path.basename(exe) || exe,
+        commandLine: "",
       });
     }
     return list;
@@ -221,10 +202,12 @@ async function rawProcsUnix() {
     const m = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(\S+)\s+(.*)$/);
     if (!m) continue;
     const name = m[6].trim();           // comm，稳定短名
-    const exe = (m[7] || "").trim() || name; // args 整串，保留路径（含空格）
+    const commandLine = (m[7] || "").trim();
+    const exe = linuxExecutableFromCommand(name, commandLine);
     list.push({
       pid: +m[1], ppid: +m[2], cpu: parseFloat(m[3]) || 0,
       memMb: (+m[4]) / 1024, startedAt: m[5], exe, name,
+      commandLine,
     });
   }
   return list;
@@ -248,7 +231,7 @@ async function rawProcsWin() {
     "Get-CimInstance Win32_PerfFormattedData_PerfProc_Process | Where-Object { $_.IDProcess -gt 0 } | ForEach-Object { $perf[[int]$_.IDProcess] = [double]$_.PercentProcessorTime };",
     "Get-CimInstance Win32_Process | ForEach-Object {",
     "  $c = $perf[[int]$_.ProcessId]; if (-not $c) { $c = 0 }",
-    "  [pscustomobject]@{ pid=$_.ProcessId; ppid=$_.ParentProcessId; startedAt=$_.CreationDate; mem=$_.WorkingSetSize; exe=$_.ExecutablePath; name=$_.Name; cpu=[math]::Round($c / $cores, 1) }",
+    "  [pscustomobject]@{ pid=$_.ProcessId; ppid=$_.ParentProcessId; startedAt=$_.CreationDate; mem=$_.WorkingSetSize; exe=$_.ExecutablePath; name=$_.Name; commandLine=$_.CommandLine; cpu=[math]::Round($c / $cores, 1) }",
     "} | ConvertTo-Json -Compress",
   ].join(" ");
   const out = await shAsync("powershell", ["-NoProfile", "-Command", ps], 64 * 1024 * 1024);
@@ -258,7 +241,7 @@ async function rawProcsWin() {
     pid: p.pid, ppid: p.ppid || 0, cpu: p.cpu || 0,
     startedAt: String(p.startedAt || ""),
     memMb: (p.mem || 0) / 1024 / 1024,
-    exe: p.exe || "", name: p.name || "",
+    exe: p.exe || "", name: p.name || "", commandLine: p.commandLine || "",
   }));
 }
 async function rawProcs() {
@@ -278,42 +261,38 @@ function merge(raw) {
     const ab = appBundle(p.exe);
     // gui：分组键命中 app bundle 即视为界面进程候选（与后端 collect_raw 一致，
     // 系统目录下 .app 的最终排除交由 listByCategory 的 isGui 把关）；否则按 exe 路径判定。
-    let key, identity, display, bundle, gui;
+    let key, identity, display, bundle, graphical;
     if (ab) {
       identity = "app:" + ab.bundle;
       key = identity;
       display = ab.name;
       bundle = ab.bundle;
-      gui = true;
+      graphical = true;
     } else if (p.exe) {
       // 非 bundle 程序只归并同一 exe 的同一棵进程树，避免把两个独立的
       // node/python 实例或同目录的不同程序一起结束。
-      let root = p;
-      let parentPid = p.ppid;
-      const seen = new Set();
-      while (parentPid > 1 && !seen.has(parentPid)) {
-        seen.add(parentPid);
-        const parent = byPid.get(parentPid);
-        if (!parent || parent.exe !== p.exe) break;
-        root = parent;
-        parentPid = parent.ppid;
-      }
+      const rootPid = findExecutableTreeRootPid(p, byPid);
       identity = "exe:" + p.exe;
-      key = identity + "#" + root.pid;
+      key = identity + "#" + rootPid;
       display = p.name;
       bundle = p.exe;
-      gui = isGui(p.exe);
+      graphical = isGraphicalApp(p.exe);
     } else {
       identity = "name:" + p.name;
       key = identity + "#" + p.pid;
       display = p.name;
       bundle = "";
-      gui = false;
+      graphical = false;
     }
-    // 后端口径：is_sys = is_system_path && !gui（住在系统目录但属界面应用的不算系统进程）
-    const sys = isSystemPath(p.exe, p.name) && !gui;
-    if (!groups.has(key)) groups.set(key, { key, identity, display, bundle, members: [], sys });
-    groups.get(key).members.push(p);
+    // systemOwned 独立于后台分类：Finder 等图形系统应用不是后台进程，
+    // 但真实图标缺失时仍应显示系统图标，而不是普通应用占位图标。
+    const systemOwned = isSystemPath(p.exe, p.name);
+    const sys = systemOwned && !graphical;
+    if (!groups.has(key)) groups.set(key, { key, identity, display, bundle, members: [], sys, systemOwned });
+    const group = groups.get(key);
+    group.sys = group.sys || sys;
+    group.systemOwned = group.systemOwned || systemOwned;
+    group.members.push(p);
   }
   const rows = [];
   for (const g of groups.values()) {
@@ -325,7 +304,7 @@ function merge(raw) {
     const allPids = g.members.map((m) => m.pid);
     const helpers = g.members.length > 1
       ? g.members.map((m, i) => ({
-          name: m.name, role: inferRole(m.name, i === 0),
+          name: m.name, role: inferRole(m.name, m.commandLine, i === 0),
           cpu: Math.round(m.cpu * 10) / 10, mem: m.memMb, pid: m.pid,
         }))
       : [];
@@ -336,60 +315,20 @@ function merge(raw) {
     rows.push({
       id: "g" + simpleHash(g.key), identity: g.identity, name: g.display,
       snapshotToken,
-      monogram: monogramFor(g.display), color: colorFor(g.display),
+      monogram: monogramFor(g.display),
       procs: g.members.length,
       cpu: Math.round(totalCpu * 10) / 10, mem: totalMem,
       pid: main.pid, path: g.bundle || main.exe,
-      helpers, sys: g.sys || undefined, allPids, autoCleanEligible: false,
+      helpers, sys: g.sys || undefined, systemOwned: g.systemOwned || undefined, allPids,
     });
   }
   return rows;
 }
 
-// 采集监听端口 → { pid: port }。mac/linux 用 lsof，win 用 netstat。
-async function listenPorts() {
-  const map = new Map();
-  try {
-    if (IS_WIN) {
-      const out = await shAsync("netstat", ["-ano", "-p", "TCP"]);
-      for (const line of out.split("\n")) {
-        const m = line.match(/^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)/i);
-        if (m) { const pid = +m[2]; if (!map.has(pid)) map.set(pid, m[1]); }
-      }
-    } else {
-      const out = await shAsync("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN"]);
-      for (const line of out.split("\n")) {
-        // 格式: COMMAND PID USER ... NAME(*:5173 (LISTEN))
-        const m = line.match(/^\S+\s+(\d+)\s+.*:(\d+)\s+\(LISTEN\)/);
-        if (m) { const pid = +m[1]; if (!map.has(pid)) map.set(pid, m[2]); }
-      }
-    }
-  } catch (_) { /* lsof/netstat 缺失或无权限，端口为空 */ }
-  return map;
-}
-
 async function listByCategory(category) {
   let rows = merge(await rawProcs());
 
-  if (category === "net") {
-    // 关联监听端口：组内任一 pid 在监听表里则标 port，只保留这些行
-    const ports = await listenPorts();
-    const withPort = [];
-    for (const r of rows) {
-      const pids = r.allPids && r.allPids.length ? r.allPids : [r.pid];
-      const hit = pids.find((p) => ports.has(p));
-      if (hit != null) { r.port = ports.get(hit); withPort.push(r); }
-    }
-    withPort.sort((a, b) => (+a.port) - (+b.port));
-    return await attachIcons(withPort);
-  }
-
-  if (category === "gui") {
-    // 与 src-tauri/src/process.rs list_by_category 对齐：界面应用 = isGui(路径) 且非系统进程。
-    // 不再用宽松的 /\.app/ 子串匹配——系统守护进程（com.apple.* 等）也住在 .app 内，
-    // isGui 已据系统目录把它们排除，绕过去会把它们漏回 gui 列表。
-    rows = rows.filter((r) => isGui(r.path) && !r.sys);
-  } else if (category === "bg") {
+  if (category === "bg") {
     rows = rows.filter((r) => r.sys);
   } else if (category === "cpu") {
     rows.sort((a, b) => b.cpu - a.cpu);
@@ -399,43 +338,53 @@ async function listByCategory(category) {
   return await attachIcons(rows);
 }
 
-// macOS 下 os.freemem() 不含可回收缓存，显示会几乎占满；改用 vm_stat 更准。
-async function macMemUsedMb(totalMb) {
+let guiCapabilityPromise = null;
+let networkCapabilityPromise = null;
+
+function capabilityError(error) {
+  return String((error && error.message) || error || "未知错误");
+}
+
+function getGuiCapability() {
+  if (process.platform !== "darwin" && process.platform !== "win32") return Promise.resolve({ status: "unsupported" });
+  if (!guiCapabilityPromise) {
+    guiCapabilityPromise = getVisibleWindowPids().then(() => ({ status: "supported" }))
+      .catch((error) => ({ status: "unavailable", error: capabilityError(error) }));
+  }
+  return guiCapabilityPromise;
+}
+
+async function getGuiSnapshot() {
   try {
-    const out = await shAsync("vm_stat", []);
-    const page = (out.match(/page size of (\d+)/) || [])[1];
-    const pageSize = page ? +page : 4096;
-    const get = (re) => { const m = out.match(re); return m ? +m[1] : 0; };
-    const free = get(/Pages free:\s+(\d+)/);
-    const inactive = get(/Pages inactive:\s+(\d+)/);
-    const speculative = get(/Pages speculative:\s+(\d+)/);
-    const purgeable = get(/Pages purgeable:\s+(\d+)/);
-    // 可用 = 空闲 + 不活跃 + 推测 + 可清除
-    const availablePages = free + inactive + speculative + purgeable;
-    const availableMb = (availablePages * pageSize) / 1024 / 1024;
-    return Math.max(0, totalMb - availableMb);
-  } catch (_) {
-    return totalMb - os.freemem() / 1024 / 1024;
+    const pids = await getVisibleWindowPids();
+    return { status: "supported", sampledAt: Date.now(), pids };
+  } catch (error) {
+    return { status: "error", sampledAt: Date.now(), pids: [], error: capabilityError(error) };
   }
 }
 
-async function systemStats() {
-  const total = os.totalmem() / 1024 / 1024;
-  const cpus = os.cpus();
-  // os.loadavg 在 Win 无效；用 1 分钟负载估算占用率（Unix）
-  let cpuPercent = 0;
-  if (!IS_WIN) {
-    const load = os.loadavg()[0];
-    cpuPercent = Math.min(100, (load / cpus.length) * 100);
+function getNetworkCapability() {
+  if (!IS_MAC) return Promise.resolve({ status: "unsupported" });
+  if (!networkCapabilityPromise) {
+    networkCapabilityPromise = probeNettop().then(() => ({ status: "supported" }))
+      .catch((error) => ({ status: "unavailable", error: capabilityError(error) }));
   }
-  let memUsed;
-  if (IS_MAC) memUsed = await macMemUsedMb(total);
-  else memUsed = total - os.freemem() / 1024 / 1024;
-  return {
-    cpuPercent: Math.round(cpuPercent * 10) / 10,
-    memUsedMb: memUsed,
-    memTotalMb: total,
-  };
+  return networkCapabilityPromise;
+}
+
+async function getNetworkSnapshot() {
+  const sampledAt = Date.now();
+  try {
+    const before = await rawProcs();
+    const rates = await collectNettop();
+    const after = await rawProcs();
+    const rows = merge(after);
+    const apps = aggregateNetworkUsage(rows, rates, before, after);
+    await attachIcons(apps.map((item) => item.app));
+    return { status: "supported", sampledAt, windowMs: 1000, apps };
+  } catch (error) {
+    return { status: "error", sampledAt, apps: [], error: capabilityError(error) };
+  }
 }
 
 // 递归收集 pid 的所有后代（Unix；用一次 ps 建父子表，避免 pkill -P 只杀一层）。
@@ -511,7 +460,7 @@ async function killProcess(id, snapshotToken, pids) {
       }
     }
   } else {
-    // 先递归展开整棵树，再统一 SIGKILL（与 Tauri 的 kill_tree 行为对齐）
+    // 先递归展开整棵树，再统一 SIGKILL。
     const all = descendantsUnix(targets).filter((p) => p !== SELF && p > 1);
     // 先杀子后杀父，减少重新派生
     all.sort((a, b) => b - a);
@@ -532,37 +481,30 @@ async function killProcess(id, snapshotToken, pids) {
   return { ok: true, killed };
 }
 
-window.services = {
+window.gooseMonitor = {
+  getRuntimePlatform: () => IS_MAC ? "mac" : IS_WIN ? "win" : "linux",
+  getGuiCapability,
+  getGuiSnapshot,
+  getNetworkCapability,
+  getNetworkSnapshot,
   listProcesses: (category) => Promise.resolve(listByCategory(category)),
-  systemStats: () => Promise.resolve(systemStats()),
   killProcess: (id, snapshotToken, pids) => killProcess(id, snapshotToken, pids),
 };
 
 /* ============================================================
    uTools 接入层（仅在 uTools 环境生效，开发态/普通浏览器自动跳过）
-   - 监听插件进入：把主输入框带进来的关键词交给前端，触发自动展开搜索框 + 过滤
+   - 监听插件进入：把主输入框带进来的关键词交给前端过滤
    - 接管 uTools 子输入框：用户在 uTools 顶部输入框打字 → 实时过滤前端列表
    前端契约（main.ts 实现，挂在 window 上）：
-     · window.__prockillEnter(keyword: string)   —— 进入时调用一次，keyword 为初始搜索词（无词时传 ""），期望：展开搜索框并按 keyword 过滤
-     · window.__prockillSubInput(text: string)    —— uTools 子输入框每次变化时调用，期望：把 text 同步到搜索框并实时过滤
+     · window.__prockillEnter(keyword: string)   —— 进入时调用一次，keyword 为初始搜索词（无词时传 ""）
+     · window.__prockillSubInput(text: string)    —— uTools 子输入框每次变化时调用并实时过滤
    注意：preload 与插件页面共享同一个 window，故可直接读写 window.__prockill*。
    ============================================================ */
 (function setupUtoolsBridge() {
   // 非 uTools 环境（开发态）utools 不存在，直接返回，不报错
   if (typeof utools === "undefined" || !utools) return;
 
-  // 从带前缀的指令文本里剥出真正的搜索词。
-  // 例："杀进程 chrome" -> "chrome"；"prockill: 1234" -> "1234"。
-  // 若没有可识别前缀（理论上 regex 已保证有前缀），则原样返回去掉首尾空白。
-  function extractKeyword(payload) {
-    if (typeof payload !== "string") return "";
-    const text = payload.trim();
-    // 与 plugin.json 中 prockill-search 的 regex 前缀保持一致
-    const m = text.match(/^(?:杀进程|结束进程|进程|内存|prockill|pk|kill)[\s:：]+(\S.*)$/i);
-    return (m ? m[1] : text).trim();
-  }
-
-  // 把初始关键词交给前端：展开搜索框并过滤。前端钩子可能晚于 preload 注册，
+  // 把初始关键词交给前端过滤。前端钩子可能晚于 preload 注册，
   // 故做一次轮询重试，命中即停（最多约 3 秒），避免进入瞬间钩子尚未挂载而丢词。
   // 用单一 timer + pending 关键词：多次快速进入只保留最后一次，避免并存的多个 timer
   // 让旧关键词在新关键词之后触发、反写出错误状态。
@@ -597,6 +539,9 @@ window.services = {
     if (typeof utools.setSubInput !== "function") return;
     try {
       utools.setSubInput(({ text }) => {
+        if (typeof utools.dbStorage?.setItem === "function") {
+          utools.dbStorage.setItem(QUERY_PREF_KEY, String(text || "").slice(0, 200));
+        }
         if (typeof window.__prockillSubInput === "function") {
           try { window.__prockillSubInput(text || ""); } catch (e) { console.error("[ProcKill] __prockillSubInput 调用失败", e); }
         }
@@ -606,17 +551,19 @@ window.services = {
     }
   }
 
-  // 监听插件进入：text（关键词/无参进入）→ 空词仅展开；regex/over（带词进入）→ 带搜索词
+  // 监听插件进入：text 表示无搜索词；regex/over 会带入搜索词。
   if (typeof utools.onPluginEnter === "function") {
     utools.onPluginEnter((entry) => {
+      // 必须在 setSubInput 前读取；部分宿主会在安装回调时先发送空文本。
+      const savedQuery = typeof utools.dbStorage?.getItem === "function"
+        ? utools.dbStorage.getItem(QUERY_PREF_KEY)
+        : "";
       // 每次进入都重新接管子输入框（uTools 退出/再进会清掉上次的 subInput）
       installSubInput();
-      // 兜底：个别 uTools 版本/异常路径可能传 undefined/null，避免解构直接抛错导致接入失效。
-      const { type, payload } = entry || {};
-      const keyword = (type === "regex" || type === "over") ? extractKeyword(payload) : "";
+      const keyword = resolveEntryQuery(entry, savedQuery);
       pushEnterKeyword(keyword);
-      // 带词进入时预填 uTools 子输入框，让顶部输入框与列表过滤状态一致
-      if (keyword && typeof utools.setSubInputValue === "function") {
+      // 进入时把显式关键词或历史筛选同步回宿主输入框。
+      if (typeof utools.setSubInputValue === "function") {
         try { utools.setSubInputValue(keyword); } catch (e) { /* 子输入框可能尚未就绪，忽略 */ }
       }
     });

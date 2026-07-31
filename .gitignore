@@ -1,16 +1,11 @@
 node_modules/
 dist/
 utools-dist/
-src-tauri/target/
-src-tauri/gen/
 *.log
 .DS_Store
 
 # 项目统一用 bun：追踪 bun.lock（覆盖全局 *.lock 忽略），不用 npm lockfile
 !bun.lock
-
-# Tauri 是应用项目，提交 Cargo.lock 以保证跨平台构建依赖一致
-!src-tauri/Cargo.lock
 
 # 本地设计走查产物不纳入版本控制
 .design-check/

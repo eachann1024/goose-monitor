@@ -1,7 +1,7 @@
 /** 主列表列布局：每个分类 tab 一套列（对齐 macOS 活动监视器思路）。 */
 import type { CategoryId } from "./types";
 
-export type MetricCol = "procs" | "cpu" | "mem" | "port" | "path";
+export type MetricCol = "procs" | "cpu" | "mem" | "download" | "upload" | "path";
 
 export interface CategoryColumnLayout {
   readonly gridTemplate: string;
@@ -10,31 +10,31 @@ export interface CategoryColumnLayout {
 }
 
 const DEFAULT: CategoryColumnLayout = {
-  gridTemplate: "16px 1fr 52px 96px 110px 56px",
+  gridTemplate: "16px minmax(140px,1fr) 56px 90px 104px",
   nameHdr: "进程 / PID",
   metrics: ["procs", "cpu", "mem"],
 };
 
 export const LAYOUT_BY_CAT: Record<CategoryId, CategoryColumnLayout> = {
-  gui: DEFAULT,
   all: DEFAULT,
+  gui: DEFAULT,
   mem: {
-    gridTemplate: "16px 1fr 52px 84px 120px 56px",
+    gridTemplate: DEFAULT.gridTemplate,
     nameHdr: "进程 / PID",
     metrics: ["procs", "cpu", "mem"],
   },
   cpu: {
-    gridTemplate: "16px 1fr 52px 120px 84px 56px",
+    gridTemplate: DEFAULT.gridTemplate,
     nameHdr: "进程 / PID",
     metrics: ["procs", "cpu", "mem"],
   },
   net: {
-    gridTemplate: "16px 1fr 72px 88px 100px 56px",
-    nameHdr: "进程 / 端口",
-    metrics: ["port", "cpu", "mem"],
+    gridTemplate: "16px minmax(140px,1fr) 86px 86px 72px 86px",
+    nameHdr: "进程 / PID",
+    metrics: ["download", "upload", "cpu", "mem"],
   },
   bg: {
-    gridTemplate: "16px minmax(100px,1fr) minmax(120px,1.4fr) 88px 96px 56px",
+    gridTemplate: "16px minmax(110px,1fr) minmax(120px,1.25fr) 90px 104px",
     nameHdr: "名称",
     metrics: ["path", "cpu", "mem"],
   },
@@ -46,10 +46,11 @@ export function layoutForCat(cat: CategoryId): CategoryColumnLayout {
 
 export function metricHdrLabel(m: MetricCol): string {
   switch (m) {
-    case "procs": return "数";
+    case "procs": return "进程数";
     case "cpu": return "CPU";
     case "mem": return "内存";
-    case "port": return "端口";
+    case "download": return "下载";
+    case "upload": return "上传";
     case "path": return "路径";
   }
 }

@@ -1,12 +1,93 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CATEGORIES,
+  visibleCategories,
+  CATEGORY_PREF_KEY,
+  QUERY_PREF_KEY,
+  SELECTION_PREF_KEY,
   fmtCpu,
   fmtMem,
+  fmtRate,
   fuzzyMatch,
   fuzzyMatchRanges,
   fuzzyMatchScore,
+  isInteractiveKeyboardTag,
+  moveSelection,
   normalizeSearchText,
+  processSelectionKey,
+  reconcileSelectionKey,
+  restoreCategory,
+  restoreQuery,
+  rowsForGuiSnapshot,
+  searchInputKeyAction,
+  sortProcessRows,
+  shouldOpenKillDialog,
+  centeredSelectionScroll,
 } from "./shared";
+import type { AppRow } from "./types";
+
+const row = (overrides: Partial<AppRow>): AppRow => ({
+  id: "app", identity: "app", snapshotToken: "snapshot", name: "App",
+  monogram: "A", procs: 1, cpu: 0, mem: 0, pid: 10,
+  path: "/Applications/App.app", helpers: [], allPids: [10], ...overrides,
+});
+
+describe("一级分类", () => {
+  test("两项能力都可用时显示六项", () => {
+    expect(CATEGORIES.map(({ id, label, key }) => ({ id, label, key }))).toEqual([
+      { id: "all", label: "全部", key: "1" },
+      { id: "gui", label: "界面", key: "2" },
+      { id: "cpu", label: "CPU", key: "3" },
+      { id: "mem", label: "内存", key: "4" },
+      { id: "net", label: "网络", key: "5" },
+      { id: "bg", label: "后台", key: "6" },
+    ]);
+  });
+
+  test("能力隐藏后快捷键按可见顺序连续重排", () => {
+    expect(visibleCategories(true, false).map(({ id, key }) => [id, key])).toEqual([
+      ["all", "1"], ["gui", "2"], ["cpu", "3"], ["mem", "4"], ["bg", "5"],
+    ]);
+    expect(visibleCategories(false, false).map(({ id, key }) => [id, key])).toEqual([
+      ["all", "1"], ["cpu", "2"], ["mem", "3"], ["bg", "4"],
+    ]);
+  });
+});
+
+describe("界面状态恢复", () => {
+  test("分类仅恢复有效值，非法或旧值回到全部", () => {
+    expect(CATEGORY_PREF_KEY).toBe("pk_category");
+    expect(restoreCategory("gpu")).toBe("all");
+    expect(restoreCategory("gui")).toBe("gui");
+    expect(restoreCategory("gui", visibleCategories(false, true))).toBe("all");
+    expect(restoreCategory("net", visibleCategories(true, false))).toBe("all");
+    expect(restoreCategory(null)).toBe("all");
+  });
+
+  test("可见窗口按组内任一 PID 命中，采集失败不冒充空列表", () => {
+    const app = row({ id: "multi", pid: 10, allPids: [10, 11] });
+    expect(rowsForGuiSnapshot([app], { status: "supported", sampledAt: 1, pids: [11] })).toEqual([app]);
+    expect(rowsForGuiSnapshot([app], { status: "supported", sampledAt: 1, pids: [] })).toEqual([]);
+    expect(rowsForGuiSnapshot([app], { status: "error", sampledAt: 1, pids: [], error: "failed" })).toBeNull();
+  });
+
+  test("筛选词可恢复并限制持久化长度", () => {
+    expect(QUERY_PREF_KEY).toBe("pk_query");
+    expect(restoreQuery("chrome")).toBe("chrome");
+    expect(restoreQuery("x".repeat(201))).toHaveLength(200);
+  });
+
+  test("无选中项默认进入首行；已有选中只在安全快照完全一致时保持", () => {
+    expect(SELECTION_PREF_KEY).toBe("pk_selected_process");
+    const rows = [row({ id: "first" }), row({ id: "second" })];
+    expect(reconcileSelectionKey(null, rows)).toBe(processSelectionKey(rows[0]));
+    const selected = processSelectionKey(row({ id: "chrome", snapshotToken: "pid:10:start:old" }));
+    expect(reconcileSelectionKey(selected, [row({ id: "chrome", snapshotToken: "pid:10:start:old" })]))
+      .toBe(selected);
+    expect(reconcileSelectionKey(selected, [row({ id: "chrome", snapshotToken: "pid:10:start:new" })]))
+      .toBe(processSelectionKey(row({ id: "chrome", snapshotToken: "pid:10:start:new" })));
+  });
+});
 
 describe("进程搜索", () => {
   test("忽略常见路径分隔符和大小写", () => {
@@ -39,5 +120,84 @@ describe("指标格式化", () => {
 
   test("CPU 固定一位小数", () => {
     expect(fmtCpu(3)).toBe("3.0%");
+  });
+
+  test("网络速率区分真实 0 与未知", () => {
+    expect(fmtRate(0)).toBe("0 B/s");
+    expect(fmtRate(1536)).toBe("1.5 KB/s");
+    expect(fmtRate(2 * 1024 * 1024)).toBe("2.0 MB/s");
+    expect(fmtRate(Number.NaN)).toBe("—");
+  });
+});
+
+describe("列表交互纯逻辑", () => {
+  test("默认无选中，方向键首次进入首项或末项", () => {
+    expect(moveSelection(-1, 1, 3)).toBe(0);
+    expect(moveSelection(-1, -1, 3)).toBe(2);
+    expect(moveSelection(-1, 1, 0)).toBe(-1);
+  });
+
+  test("选择不会越过列表边界", () => {
+    expect(moveSelection(2, 1, 3)).toBe(2);
+    expect(moveSelection(0, -1, 3)).toBe(0);
+  });
+
+  test("数值列默认可按降序排列，名称可按升序排列", () => {
+    const rows = [row({ id: "a", name: "Beta", mem: 20 }), row({ id: "b", name: "Alpha", mem: 40 })];
+    expect(sortProcessRows(rows, "mem", "desc").map((item) => item.id)).toEqual(["b", "a"]);
+    expect(sortProcessRows(rows, "name", "asc").map((item) => item.id)).toEqual(["b", "a"]);
+  });
+
+  test("排序和轮询重排不会让选择漂移到另一进程", () => {
+    const alpha = row({ id: "alpha", snapshotToken: "snapshot-a", mem: 10 });
+    const beta = row({ id: "beta", snapshotToken: "snapshot-b", mem: 20 });
+    const selected = processSelectionKey(alpha);
+    const reordered = sortProcessRows([alpha, beta], "mem", "desc");
+    expect(reconcileSelectionKey(selected, reordered)).toBe(selected);
+    expect(reordered.find((item) => processSelectionKey(item) === selected)?.id).toBe("alpha");
+    expect(reconcileSelectionKey(selected, reordered.filter((item) => item.id === "alpha"))).toBe(selected);
+  });
+
+  test("对象消失或安全快照变化时按原索引附近回退", () => {
+    const selected = processSelectionKey(row({ id: "alpha", snapshotToken: "old" }));
+    expect(reconcileSelectionKey(selected, [row({ id: "beta", snapshotToken: "b" })])).toBe(processSelectionKey(row({ id: "beta", snapshotToken: "b" })));
+    const rows = [row({ id: "a" }), row({ id: "b" }), row({ id: "c" })];
+    expect(reconcileSelectionKey("missing", rows, 2)).toBe(processSelectionKey(rows[2]));
+    expect(reconcileSelectionKey("missing", rows, 9)).toBe(processSelectionKey(rows[2]));
+    expect(reconcileSelectionKey("missing", [], 0)).toBeNull();
+  });
+
+  test("Enter 只从列表或开发搜索框打开确认，交互控件与弹窗态不误触", () => {
+    expect(shouldOpenKillDialog("Enter", "list", false)).toBe(true);
+    expect(shouldOpenKillDialog("Enter", "search", false)).toBe(true);
+    expect(shouldOpenKillDialog("Enter", "interactive", false)).toBe(false);
+    expect(shouldOpenKillDialog("Enter", "list", true)).toBe(false);
+    expect(shouldOpenKillDialog(" ", "list", false)).toBe(false);
+  });
+
+  test("选中行越过中线才滚动，并在上下边界 clamp", () => {
+    const base = { scrollTop: 0, clientHeight: 200, scrollHeight: 1000, rowHeight: 44 };
+    expect(centeredSelectionScroll({ ...base, rowTop: 44, direction: 1 })).toBe(0);
+    expect(centeredSelectionScroll({ ...base, rowTop: 132, direction: 1 })).toBe(54);
+    expect(centeredSelectionScroll({ ...base, scrollTop: 300, rowTop: 320, direction: -1 })).toBe(242);
+    expect(centeredSelectionScroll({ ...base, scrollTop: 800, rowTop: 990, direction: 1 })).toBe(800);
+    expect(centeredSelectionScroll({ ...base, scrollTop: 20, rowTop: 0, direction: -1 })).toBe(0);
+  });
+
+  test("交互控件和可编辑目标不参与列表全局快捷键", () => {
+    for (const tag of ["input", "textarea", "select", "button", "a"]) {
+      expect(isInteractiveKeyboardTag(tag)).toBe(true);
+    }
+    expect(isInteractiveKeyboardTag("div", true)).toBe(true);
+    expect(isInteractiveKeyboardTag("div", false)).toBe(false);
+  });
+
+  test("搜索框仅将 Esc 和上下键交给列表", () => {
+    expect(searchInputKeyAction("Escape")).toBe("clear");
+    expect(searchInputKeyAction("ArrowDown")).toBe("navigate");
+    expect(searchInputKeyAction("ArrowUp")).toBe("navigate");
+    expect(searchInputKeyAction("ArrowLeft")).toBe("native");
+    expect(searchInputKeyAction("ArrowRight")).toBe("native");
+    expect(searchInputKeyAction("a")).toBe("native");
   });
 });

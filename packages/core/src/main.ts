@@ -790,9 +790,11 @@ class ProcKillApp {
     for (const c of this.categories) {
       const ref = this.categoryBtns[c.id];
       const on = c.id === s.cat;
-      ref.btn.style.background = "transparent";
+      // 选中态背景 / 描边交给 CSS（.pk-cat-tab[data-active]），这里只清 inline 覆盖。
+      ref.btn.style.background = "";
       ref.btn.style.borderColor = "transparent";
       ref.label.style.color = on ? "var(--fg-1)" : "var(--fg-2)";
+      ref.label.style.fontWeight = on ? "600" : "";
       ref.btn.setAttribute("aria-selected", on ? "true" : "false");
       ref.btn.setAttribute("tabindex", on ? "0" : "-1");
       if (on) ref.btn.setAttribute("data-active", "");
@@ -953,7 +955,7 @@ class ProcKillApp {
   // 新建一行（结构骨架，值由 updateRow 填）。
   private buildRow(a: AppRow): RowRefs {
     const s = this.s;
-    const wrap = h("div");
+    const wrap = h("div", { className: "pk-app-group" });
 
     const caret = h("button", {
       attrs: { type: "button", "data-row-action": "expand", "aria-label": `${a.name} 的子进程`, "aria-expanded": "false" },
@@ -1088,7 +1090,7 @@ class ProcKillApp {
     }
     ref.signature = sig;
 
-    // 选中样式由 CSS 驱动（轻底 + 左线）；wrap 的 data-sel 让展开 helper 继承组选中底色。
+    // 选中样式由 CSS 驱动（组卡片轻底 + 细描边）；wrap 的 data-sel 让展开 helper 同组高亮。
     if (selected) {
       ref.row.setAttribute("data-sel", "1");
       ref.wrap.setAttribute("data-sel", "1");
