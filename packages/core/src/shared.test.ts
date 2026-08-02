@@ -5,6 +5,8 @@ import {
   CATEGORY_PREF_KEY,
   QUERY_PREF_KEY,
   SELECTION_PREF_KEY,
+  SORT_KEY_PREF_KEY,
+  SORT_DIR_PREF_KEY,
   fmtCpu,
   fmtMem,
   fmtRate,
@@ -18,6 +20,8 @@ import {
   reconcileSelectionKey,
   restoreCategory,
   restoreQuery,
+  restoreSort,
+  cycleCategoryIndex,
   rowsForGuiSnapshot,
   searchInputKeyAction,
   sortProcessRows,
@@ -77,7 +81,28 @@ describe("界面状态恢复", () => {
     expect(restoreQuery("x".repeat(201))).toHaveLength(200);
   });
 
-  test("无选中项默认进入首行；已有选中只在安全快照完全一致时保持", () => {
+  test("排序偏好按分类校验，非法值回落默认", () => {
+    expect(SORT_KEY_PREF_KEY).toBe("pk_sort_key");
+    expect(SORT_DIR_PREF_KEY).toBe("pk_sort_dir");
+    expect(restoreSort("cpu", "asc", "all")).toEqual({ key: "cpu", dir: "asc" });
+    expect(restoreSort("download", "desc", "net")).toEqual({ key: "download", dir: "desc" });
+    expect(restoreSort("download", "desc", "all")).toEqual({ key: "mem", dir: "desc" });
+    expect(restoreSort("bogus", null, "cpu")).toEqual({ key: "cpu", dir: "desc" });
+    expect(restoreSort("name", "nope", "all")).toEqual({ key: "name", dir: "asc" });
+    expect(restoreSort(null, null, "net")).toEqual({ key: "network", dir: "desc" });
+  });
+
+  test("Tab 在可见分类间循环，Shift 反向", () => {
+    expect(cycleCategoryIndex(0, 1, 5)).toBe(1);
+    expect(cycleCategoryIndex(4, 1, 5)).toBe(0);
+    expect(cycleCategoryIndex(0, -1, 5)).toBe(4);
+    expect(cycleCategoryIndex(2, -1, 5)).toBe(1);
+    expect(cycleCategoryIndex(-1, 1, 5)).toBe(0);
+    expect(cycleCategoryIndex(99, -1, 5)).toBe(4);
+    expect(cycleCategoryIndex(0, 1, 0)).toBe(0);
+  });
+
+  test("无选中项默认进入首行；同 id 快照轮转时粘留选中", () => {
     expect(SELECTION_PREF_KEY).toBe("pk_selected_process");
     const rows = [row({ id: "first" }), row({ id: "second" })];
     expect(reconcileSelectionKey(null, rows)).toBe(processSelectionKey(rows[0]));
@@ -86,6 +111,19 @@ describe("界面状态恢复", () => {
       .toBe(selected);
     expect(reconcileSelectionKey(selected, [row({ id: "chrome", snapshotToken: "pid:10:start:new" })]))
       .toBe(processSelectionKey(row({ id: "chrome", snapshotToken: "pid:10:start:new" })));
+  });
+
+  test("快照轮转时不因排序位移跳到其他进程", () => {
+    const alpha = row({ id: "alpha", snapshotToken: "old", mem: 10 });
+    const beta = row({ id: "beta", snapshotToken: "b", mem: 50 });
+    const selected = processSelectionKey(alpha);
+    // alpha 仍在列表但位置变了且 snapshot 更新
+    const reordered = [
+      row({ id: "beta", snapshotToken: "b", mem: 50 }),
+      row({ id: "alpha", snapshotToken: "new", mem: 10 }),
+    ];
+    expect(reconcileSelectionKey(selected, reordered, 0))
+      .toBe(processSelectionKey(row({ id: "alpha", snapshotToken: "new" })));
   });
 });
 
@@ -158,7 +196,7 @@ describe("列表交互纯逻辑", () => {
     expect(reconcileSelectionKey(selected, reordered.filter((item) => item.id === "alpha"))).toBe(selected);
   });
 
-  test("对象消失或安全快照变化时按原索引附近回退", () => {
+  test("选中组消失时按原索引附近回退", () => {
     const selected = processSelectionKey(row({ id: "alpha", snapshotToken: "old" }));
     expect(reconcileSelectionKey(selected, [row({ id: "beta", snapshotToken: "b" })])).toBe(processSelectionKey(row({ id: "beta", snapshotToken: "b" })));
     const rows = [row({ id: "a" }), row({ id: "b" }), row({ id: "c" })];

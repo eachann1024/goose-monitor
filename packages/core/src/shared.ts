@@ -5,6 +5,11 @@ import type { Category, AppRow, GuiSnapshot } from "./types";
 export const QUERY_PREF_KEY = "pk_query";
 export const CATEGORY_PREF_KEY = "pk_category";
 export const SELECTION_PREF_KEY = "pk_selected_process";
+export const SORT_KEY_PREF_KEY = "pk_sort_key";
+export const SORT_DIR_PREF_KEY = "pk_sort_dir";
+/** 网络分类单独记，避免与通用排序互相覆盖。 */
+export const NET_SORT_KEY_PREF_KEY = "pk_net_sort_key";
+export const NET_SORT_DIR_PREF_KEY = "pk_net_sort_dir";
 
 export const ALL_CATEGORIES: Category[] = [
   { id: "all", label: "全部", icon: "list", key: "1" },
@@ -40,6 +45,39 @@ export function restoreQuery(value: string | null): string {
   return (value ?? "").slice(0, 200);
 }
 
+/** Tab / Shift+Tab 在可见分类间循环。 */
+export function cycleCategoryIndex(current: number, direction: 1 | -1, length: number): number {
+  if (length <= 0) return 0;
+  if (current < 0 || current >= length) return direction > 0 ? 0 : length - 1;
+  return (current + direction + length) % length;
+}
+
+export type ProcessSortKey = "mem" | "cpu" | "procs" | "name" | "network" | "download" | "upload";
+export type ProcessSortDir = "asc" | "desc";
+
+const GENERAL_SORT_KEYS: readonly ProcessSortKey[] = ["mem", "cpu", "procs", "name"];
+const NET_SORT_KEYS: readonly ProcessSortKey[] = ["network", "download", "upload", "cpu", "mem", "name"];
+
+export function sortKeysForCategory(cat: Category["id"]): readonly ProcessSortKey[] {
+  return cat === "net" ? NET_SORT_KEYS : GENERAL_SORT_KEYS;
+}
+
+/** 按当前分类校验并恢复排序；非法值回落到该分类默认。 */
+export function restoreSort(
+  keyRaw: string | null,
+  dirRaw: string | null,
+  cat: Category["id"],
+): { key: ProcessSortKey; dir: ProcessSortDir } {
+  const allowed = sortKeysForCategory(cat);
+  const key = allowed.includes(keyRaw as ProcessSortKey)
+    ? keyRaw as ProcessSortKey
+    : (cat === "net" ? "network" : cat === "cpu" ? "cpu" : "mem");
+  const dir: ProcessSortDir = dirRaw === "asc" || dirRaw === "desc"
+    ? dirRaw
+    : (key === "name" ? "asc" : "desc");
+  return { key, dir };
+}
+
 /** 默认无选中；第一次向下/向上分别进入首项/末项。 */
 export function moveSelection(current: number, direction: -1 | 1, length: number): number {
   if (length <= 0) return -1;
@@ -47,14 +85,31 @@ export function moveSelection(current: number, direction: -1 | 1, length: number
   return Math.max(0, Math.min(length - 1, current + direction));
 }
 
-/** 选择身份绑定进程组与其安全快照；成员变化时旧选择自动失效。 */
+/** 选择身份绑定进程组与其安全快照；结束操作仍用当前行的 snapshotToken 校验。 */
 export function processSelectionKey(row: Pick<AppRow, "id" | "snapshotToken">): string {
   return `${row.id}\u0000${row.snapshotToken}`;
 }
 
+/** 从选择键取出应用 id（snapshot 段可含任意内容）。 */
+export function selectionKeyAppId(selectedKey: string): string {
+  const sep = selectedKey.indexOf("\u0000");
+  return sep >= 0 ? selectedKey.slice(0, sep) : selectedKey;
+}
+
+/**
+ * 协调当前选择：
+ * 1) 完整键仍在 → 保持；
+ * 2) 同 id 仅 snapshot 轮转 → 粘到新键（避免 CPU 排序时选中跳行）；
+ * 3) 组消失 → 按原索引附近回退。
+ */
 export function reconcileSelectionKey(selectedKey: string | null, rows: AppRow[], fallbackIndex = 0): string | null {
   if (rows.length === 0) return null;
   if (selectedKey && rows.some((row) => processSelectionKey(row) === selectedKey)) return selectedKey;
+  if (selectedKey) {
+    const id = selectionKeyAppId(selectedKey);
+    const byId = rows.find((row) => row.id === id);
+    if (byId) return processSelectionKey(byId);
+  }
   const index = Math.max(0, Math.min(rows.length - 1, fallbackIndex));
   return processSelectionKey(rows[index]);
 }
@@ -98,12 +153,9 @@ export function searchInputKeyAction(key: string): SearchInputKeyAction {
   return "native";
 }
 
-export type ProcessSortKey = "mem" | "cpu" | "procs" | "name";
-export type ProcessSortDir = "asc" | "desc";
-
 export function sortProcessRows(
   rows: AppRow[],
-  key: ProcessSortKey,
+  key: Exclude<ProcessSortKey, "network" | "download" | "upload">,
   direction: ProcessSortDir,
 ): AppRow[] {
   return [...rows].sort((a, b) => {
