@@ -15,6 +15,10 @@ import {
   CATEGORY_PREF_KEY,
   QUERY_PREF_KEY,
   SELECTION_PREF_KEY,
+  SORT_KEY_PREF_KEY,
+  SORT_DIR_PREF_KEY,
+  NET_SORT_KEY_PREF_KEY,
+  NET_SORT_DIR_PREF_KEY,
   fmtMem,
   fmtCpu,
   fmtRate,
@@ -27,10 +31,14 @@ import {
   reconcileSelectionKey,
   restoreCategory,
   restoreQuery,
+  restoreSort,
+  cycleCategoryIndex,
   rowsForGuiSnapshot,
   searchInputKeyAction,
   shouldOpenKillDialog,
   centeredSelectionScroll,
+  type ProcessSortKey,
+  type ProcessSortDir,
 } from "./shared";
 import { icon } from "./icons";
 import { appIcon, kbd, enterKey, h, highlight } from "./atoms";
@@ -44,8 +52,8 @@ import {
   type UiTheme,
 } from "./theme";
 
-type SortKey = "mem" | "cpu" | "procs" | "name" | "network" | "download" | "upload";
-type SortDir = "asc" | "desc";
+type SortKey = ProcessSortKey;
+type SortDir = ProcessSortDir;
 
 // 列布局：category-layout.ts（每 tab 一套列）
 const REFRESH_MS = 2000;
@@ -141,10 +149,20 @@ class ProcKillApp {
     );
     const initialCategory = restoreCategory(this.bridge.getPref(CATEGORY_PREF_KEY));
     this.savedCategory = initialCategory;
+    const sortPrefs = initialCategory === "net"
+      ? {
+          key: this.bridge.getPref(NET_SORT_KEY_PREF_KEY) ?? this.bridge.getPref(SORT_KEY_PREF_KEY),
+          dir: this.bridge.getPref(NET_SORT_DIR_PREF_KEY) ?? this.bridge.getPref(SORT_DIR_PREF_KEY),
+        }
+      : {
+          key: this.bridge.getPref(SORT_KEY_PREF_KEY),
+          dir: this.bridge.getPref(SORT_DIR_PREF_KEY),
+        };
+    const initialSort = restoreSort(sortPrefs.key, sortPrefs.dir, initialCategory);
     this.s = {
       cat: initialCategory,
-      sortKey: "mem",
-      sortDir: "desc",
+      sortKey: initialSort.key,
+      sortDir: initialSort.dir,
       // 每次打开都从当前结果的第一行开始；进程快照变化时仍由会话内选择键保持稳定。
       selectedKey: null,
       expanded: new Set(),
@@ -187,6 +205,38 @@ class ProcKillApp {
   private setSortKey(key: SortKey): void {
     this.s.sortKey = key;
     this.s.sortDir = key === "name" ? "asc" : "desc";
+    this.persistSort();
+  }
+
+  private persistSort(): void {
+    if (this.s.cat === "net") {
+      this.bridge.setPref(NET_SORT_KEY_PREF_KEY, this.s.sortKey);
+      this.bridge.setPref(NET_SORT_DIR_PREF_KEY, this.s.sortDir);
+      return;
+    }
+    this.bridge.setPref(SORT_KEY_PREF_KEY, this.s.sortKey);
+    this.bridge.setPref(SORT_DIR_PREF_KEY, this.s.sortDir);
+  }
+
+  private readSortPrefs(cat: CategoryId): { key: string | null; dir: string | null } {
+    if (cat === "net") {
+      return {
+        key: this.bridge.getPref(NET_SORT_KEY_PREF_KEY) ?? this.bridge.getPref(SORT_KEY_PREF_KEY),
+        dir: this.bridge.getPref(NET_SORT_DIR_PREF_KEY) ?? this.bridge.getPref(SORT_DIR_PREF_KEY),
+      };
+    }
+    return {
+      key: this.bridge.getPref(SORT_KEY_PREF_KEY),
+      dir: this.bridge.getPref(SORT_DIR_PREF_KEY),
+    };
+  }
+
+  private applySortForCategory(cat: CategoryId): void {
+    const prefs = this.readSortPrefs(cat);
+    const next = restoreSort(prefs.key, prefs.dir, cat);
+    this.s.sortKey = next.key;
+    this.s.sortDir = next.dir;
+    this.persistSort();
   }
 
   // ---------- 派生数据 ----------
@@ -393,7 +443,7 @@ class ProcKillApp {
       if (m === "cpu" || m === "mem" || m === "download" || m === "upload") {
         this.headGrid.appendChild(this.sortHdr(metricHdrLabel(m), m));
       } else {
-        const align = m === "path" ? "left" : "center";
+        const align = m === "path" ? "left" : "right";
         this.headGrid.appendChild(h("span", {
           className: "t-label",
           style: { textAlign: align },
@@ -431,11 +481,7 @@ class ProcKillApp {
   private setCat(cat: CategoryId): void {
     if (cat === this.s.cat || !this.categories.some((category) => category.id === cat)) return;
     this.s.cat = cat;
-    if (cat === "net") { this.s.sortKey = "network"; this.s.sortDir = "desc"; }
-    else if (this.s.sortKey === "network" || this.s.sortKey === "download" || this.s.sortKey === "upload") {
-      this.s.sortKey = cat === "cpu" ? "cpu" : "mem";
-      this.s.sortDir = "desc";
-    }
+    this.applySortForCategory(cat);
     this.bridge.setPref(CATEGORY_PREF_KEY, cat);
     this.refreshGridLayout();
     this.setSelectedKey(null);
@@ -448,6 +494,14 @@ class ProcKillApp {
     this.clearAllRows();
     this.update();
     this.load();
+  }
+
+  private cycleCategory(direction: 1 | -1): void {
+    if (this.categories.length === 0) return;
+    const index = this.categories.findIndex((category) => category.id === this.s.cat);
+    const next = cycleCategoryIndex(index, direction, this.categories.length);
+    this.setCat(this.categories[next].id);
+    this.scroll?.focus({ preventScroll: true });
   }
 
   // 设置搜索词（uTools 带词进入 / 子输入框驱动）。
@@ -493,6 +547,12 @@ class ProcKillApp {
             focusable[next].focus();
           }
         }
+        return;
+      }
+      // Tab / Shift+Tab：循环切换可见分组（弹窗外全局接管，含搜索框与分类按钮焦点）。
+      if (e.key === "Tab") {
+        e.preventDefault();
+        this.cycleCategory(e.shiftKey ? -1 : 1);
         return;
       }
       // 搜索框保留普通输入/左右键，只把 Esc 与上下键交给结果列表。
@@ -672,7 +732,7 @@ class ProcKillApp {
       className: `pk-toolbar${this.usesEmbeddedSearch ? " pk-toolbar--dev" : ""}`,
       style: {
         height: "42px", flex: "none", display: "flex", alignItems: "center", gap: "8px",
-        padding: "0 10px", borderBottom: "1px solid var(--border-1)", background: "var(--bg-sidebar)",
+        padding: "0 10px", background: "var(--bg-sidebar)",
       },
       children: [tabs, this.closeHint, ...(this.usesEmbeddedSearch ? [this.searchBar] : [])],
     });
@@ -694,8 +754,8 @@ class ProcKillApp {
     this.headGrid = h("div", {
       className: "pk-list-head",
       style: {
-        display: "grid", gap: "6px", alignItems: "center",
-        padding: "0 12px", height: "24px", flex: "none", borderBottom: "1px solid var(--border-1)",
+        display: "grid", gap: "4px", alignItems: "center",
+        padding: "0 6px 0 12px", height: "24px", flex: "none",
       },
     });
     main.appendChild(this.headGrid);
@@ -704,7 +764,7 @@ class ProcKillApp {
     // 列表滚动区（持久）
     this.scroll = h("div", {
       className: "scroll",
-      attrs: { id: "pk-scroll", role: "listbox", tabindex: "0", "aria-label": "进程列表，使用上下方向键移动选择" },
+      attrs: { id: "pk-scroll", role: "listbox", tabindex: "0", "aria-label": "进程列表，使用上下方向键移动选择，Tab 切换分组" },
       style: { flex: "1 1 auto", minHeight: "0", overflowY: "auto" },
     });
     // 空态/加载态提示（持久，按需显隐）
@@ -726,14 +786,18 @@ class ProcKillApp {
         "aria-sort": s.sortKey === key ? (s.sortDir === "asc" ? "ascending" : "descending") : "none",
       },
       style: {
-        width: "100%", border: "none", background: "transparent", cursor: "pointer", textAlign: "center",
-        display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "3px",
+        width: "100%", border: "none", background: "transparent", cursor: "pointer", textAlign: "right",
+        display: "inline-flex", alignItems: "center", justifyContent: "flex-end", gap: "3px",
         padding: "0", font: "var(--t-label)", textTransform: "uppercase",
         letterSpacing: "0.07em", fontWeight: "600", color: "var(--fg-3)",
       },
       on: { click: () => {
-        if (s.sortKey === key) s.sortDir = s.sortDir === "desc" ? "asc" : "desc";
-        else this.setSortKey(key);
+        if (s.sortKey === key) {
+          s.sortDir = s.sortDir === "desc" ? "asc" : "desc";
+          this.persistSort();
+        } else {
+          this.setSortKey(key);
+        }
         this.update();
       } },
       children: [document.createTextNode(label), arrow],
@@ -971,22 +1035,22 @@ class ProcKillApp {
     const pathLine = h("span", { className: "pk-row-pid", style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", flex: "none" } });
     const nameCol = h("div", { style: { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" }, children: [iconHolder, nameLine, pathLine] });
 
-    const procWrap = h("div", { className: "num", style: { textAlign: "center" } });
-    const cpuVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "center" } });
-    const cpuCol = h("div", { style: { textAlign: "center" }, children: [cpuVal] });
-    const memVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "center" } });
-    const memCol = h("div", { style: { textAlign: "center" }, children: [memVal] });
-    const downloadVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "center", whiteSpace: "nowrap" } });
-    const downloadCol = h("div", { className: "pk-network-download", style: { textAlign: "center" }, children: [downloadVal] });
-    const uploadVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "center", whiteSpace: "nowrap" } });
-    const uploadCol = h("div", { className: "pk-network-upload", style: { textAlign: "center" }, children: [uploadVal] });
+    const procWrap = h("div", { className: "num", style: { textAlign: "right" } });
+    const cpuVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "right" } });
+    const cpuCol = h("div", { style: { textAlign: "right" }, children: [cpuVal] });
+    const memVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "right" } });
+    const memCol = h("div", { style: { textAlign: "right" }, children: [memVal] });
+    const downloadVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "right", whiteSpace: "nowrap" } });
+    const downloadCol = h("div", { className: "pk-network-download", style: { textAlign: "right" }, children: [downloadVal] });
+    const uploadVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "right", whiteSpace: "nowrap" } });
+    const uploadCol = h("div", { className: "pk-network-upload", style: { textAlign: "right" }, children: [uploadVal] });
 
     const row = h("div", {
       className: "pk-process-row",
       attrs: { id: `pk-row-${this.domId(a.id)}`, role: "option", tabindex: "-1", "aria-selected": "false" },
       style: {
-        display: "grid", gridTemplateColumns: layoutForCat(this.s.cat).gridTemplate, alignItems: "center", gap: "6px",
-        padding: "0 12px", height: "38px", cursor: "pointer", position: "relative",
+        display: "grid", gridTemplateColumns: layoutForCat(this.s.cat).gridTemplate, alignItems: "center", gap: "4px",
+        padding: "0 6px 0 12px", height: "38px", cursor: "pointer", position: "relative",
         background: "transparent",
       },
       on: {
@@ -1039,7 +1103,7 @@ class ProcKillApp {
         text: a.path,
       }));
     } else if (show.has("procs")) {
-      ref.procWrap.style.textAlign = "center";
+      ref.procWrap.style.textAlign = "right";
       if (a.procs > 1) {
         ref.procWrap.replaceChildren(h("span", {
           style: { font: "var(--t-mono-sm)", color: "var(--fg-2)", whiteSpace: "nowrap" },
@@ -1090,7 +1154,7 @@ class ProcKillApp {
     }
     ref.signature = sig;
 
-    // 选中样式由 CSS 驱动（组卡片轻底 + 细描边）；wrap 的 data-sel 让展开 helper 同组高亮。
+    // 选中样式由 CSS 驱动（方案 A：轻底 + 左线）；wrap 的 data-sel 让展开 helper 同组高亮。
     if (selected) {
       ref.row.setAttribute("data-sel", "1");
       ref.wrap.setAttribute("data-sel", "1");
@@ -1138,8 +1202,8 @@ class ProcKillApp {
     const hr = h("div", {
       className: "pk-helper-row",
       style: {
-        display: "grid", gridTemplateColumns: layoutForCat(this.s.cat).gridTemplate, alignItems: "center", gap: "6px",
-        padding: "0 12px", height: "24px", background: "var(--bg-helper-row)",
+        display: "grid", gridTemplateColumns: layoutForCat(this.s.cat).gridTemplate, alignItems: "center", gap: "4px",
+        padding: "0 6px 0 12px", height: "24px", background: "var(--bg-helper-row)",
       },
     });
     hr.appendChild(h("span"));
@@ -1156,9 +1220,9 @@ class ProcKillApp {
     hr.appendChild(cell);
     for (const m of layoutForCat(this.s.cat).metrics) {
       if (m === "cpu") {
-        hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "center" }, text: fmtCpu(hp.cpu) }));
+        hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "right" }, text: fmtCpu(hp.cpu) }));
       } else if (m === "mem") {
-        hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "center" }, text: fmtMem(hp.mem) }));
+        hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "right" }, text: fmtMem(hp.mem) }));
       } else {
         hr.appendChild(h("span"));
       }
@@ -1252,7 +1316,11 @@ class ProcKillApp {
     this.categories = visibleCategories(gui.status === "supported", network.status === "supported");
     this.s.cat = restoreCategory(this.savedCategory, this.categories);
     if (this.s.cat !== this.savedCategory) this.bridge.setPref(CATEGORY_PREF_KEY, "all");
-    if (this.s.cat === "net") this.s.sortKey = "network";
+    // 可见分类就绪后，按最终分类再校正一次排序偏好。
+    const prefs = this.readSortPrefs(this.s.cat);
+    const sort = restoreSort(prefs.key, prefs.dir, this.s.cat);
+    this.s.sortKey = sort.key;
+    this.s.sortDir = sort.dir;
     this.mount();
     this.installKeys();
     this.installUtoolsHooks();

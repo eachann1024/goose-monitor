@@ -107,6 +107,19 @@ input::placeholder { color: var(--fg-3); opacity: 1; }
   white-space: nowrap;
 }
 
+/* 末列是内存指标：表头与数值共用右边界，消除列尾的无效留白。
+   :last-child 同时覆盖常规、后台和网络布局，不绑定易变化的列序号。 */
+.pk-list-head > :last-child,
+.pk-process-row > :last-child,
+.pk-helper-row > :last-child {
+  justify-self: end;
+  width: auto !important;
+  text-align: right !important;
+}
+.pk-list-head > button:last-child {
+  justify-content: flex-end !important;
+}
+
 .pk-row-pid {
   visibility: hidden;
   opacity: 0;
@@ -120,39 +133,19 @@ input::placeholder { color: var(--fg-3); opacity: 1; }
   visibility: visible;
   opacity: 1;
 }
-.pk-app-group {
-  position: relative;
-}
-/* 未选中 hover：整行轻底 */
+/* 未选中 hover：整行轻底（弱于 selected） */
 .pk-process-row:hover {
   background: var(--bg-row-hover) !important;
 }
-/* 选中组：圆角轻底，无描边 */
-.pk-app-group[data-sel]::before {
-  content: "";
-  position: absolute;
-  inset: 1px 6px;
-  border-radius: 8px;
-  background: var(--bg-row-sel);
-  pointer-events: none;
-  z-index: 0;
-}
-.pk-app-group[data-sel] > * {
-  position: relative;
-  z-index: 1;
-}
-/* 主行与 helper 交给组卡片，避免叠色；hover 不盖过 selected */
+/* 方案 A：选中组轻底 + 左线；selected:hover 同规则，hover 不得盖过 selected */
 .pk-process-row[data-sel],
-.pk-process-row[data-sel]:hover,
-.pk-app-group[data-sel] .pk-process-row,
-.pk-app-group[data-sel] .pk-process-row:hover,
-.pk-app-group[data-sel] .pk-helper-row {
-  background: transparent !important;
-  box-shadow: none;
+.pk-process-row[data-sel]:hover {
+  background: var(--bg-row-sel) !important;
+  box-shadow: inset 2px 0 0 var(--accent);
 }
-/* 选中时名称略加重，键盘定位更清楚 */
-.pk-process-row[data-sel] .t-sm {
-  font-weight: 600;
+/* 展开 helper 与主行同组选中底色（wrap 带 data-sel） */
+.pk-app-group[data-sel] .pk-helper-row {
+  background: var(--bg-row-sel) !important;
 }
 @media (hover: none) {
   .pk-row-pid {

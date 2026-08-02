@@ -7,12 +7,19 @@ const css = readFileSync(resolve(import.meta.dir, "../styles/app.css"), "utf8");
 
 describe("高密度列表与键盘焦点", () => {
   test("主行与 Helper 行使用紧凑高度", () => {
-    expect(main).toContain('padding: "0 12px", height: "38px"');
-    expect(main).toContain('padding: "0 12px", height: "24px"');
+    expect(main).toContain('padding: "0 6px 0 12px", height: "38px"');
+    expect(main).toContain('padding: "0 6px 0 12px", height: "24px"');
     expect(main).not.toContain('padding: "0 12px", height: "44px"');
   });
 
-  test("选中状态使用组卡片轻底（无描边），且 hover 不盖过 selected", () => {
+  test("指标列紧凑右对齐，释放空间归名称列", () => {
+    expect(main).toContain('justifyContent: "flex-end"');
+    expect(main).toContain('const procWrap = h("div", { className: "num", style: { textAlign: "right" } });');
+    expect(main).toContain('ref.procWrap.style.textAlign = "right"');
+    expect(main).toContain('padding: "0 6px 0 12px", height: "24px", flex: "none"');
+  });
+
+  test("选中状态使用方案 A（轻底 + 左线），且 hover 不盖过 selected", () => {
     // 不再用 inline 强制 transparent/none 抹掉选中样式
     expect(main).not.toContain('ref.row.style.background = "transparent"');
     expect(main).not.toContain('ref.row.style.boxShadow = "none"');
@@ -21,13 +28,15 @@ describe("高密度列表与键盘焦点", () => {
     expect(main).toContain('ref.wrap.setAttribute("data-sel", "1")');
     expect(main).toContain('className: "pk-app-group"');
     expect(css).toContain("var(--bg-row-sel)");
-    // 圆角轻底、无描边；不用通栏死灰条 / 硬左线
-    expect(css).toContain(".pk-app-group[data-sel]::before");
-    expect(css).toContain("border-radius: 8px");
+    expect(css).toContain("var(--bg-row-hover)");
+    // 方案 A：整行轻底 + 2px 左线；不用圆角卡片伪元素
+    expect(css).toContain("inset 2px 0 0 var(--accent)");
+    expect(css).not.toContain(".pk-app-group[data-sel]::before");
     expect(css).not.toContain("inset 0 0 0 1px var(--border-1)");
-    expect(css).not.toContain("inset 2px 0 0 var(--accent)");
     // selected 与 selected:hover 同规则，保证 hover 不盖过 selected
     expect(css).toContain(".pk-process-row[data-sel],\n.pk-process-row[data-sel]:hover");
+    // 名称不加粗，避免选中切换时字重跳动
+    expect(css).not.toContain(".pk-process-row[data-sel] .t-sm {\n  font-weight: 600;");
     expect(css).not.toContain(".pk-process-row:focus-within {\n  box-shadow:");
   });
 

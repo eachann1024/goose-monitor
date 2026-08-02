@@ -42,9 +42,9 @@ export function appIcon(app: AppRow, size = 28, radius?: number): HTMLElement {
 
   const isSystem = kind === "system";
   Object.assign(el.style, {
-    background: isSystem ? "var(--fg-1)" : "var(--bg-elev)",
-    border: `1px solid ${isSystem ? "var(--fg-1)" : "var(--border-2)"}`,
-    color: isSystem ? "var(--bg-app)" : "var(--fg-2)",
+    background: "var(--app-icon-bg)",
+    border: "1px solid var(--app-icon-border)",
+    color: "var(--app-icon-fg)",
   } as Partial<CSSStyleDeclaration>);
   el.title = isSystem ? "系统应用或进程" : "应用或进程";
   el.setAttribute("aria-hidden", "true");
