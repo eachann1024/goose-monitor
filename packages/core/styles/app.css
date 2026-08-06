@@ -57,10 +57,10 @@ body.boxed .win {
 }
 
 /* 自定义滚动条。 */
-.scroll { overflow-y: auto; scrollbar-width: thin; scrollbar-color: #4a4a4a transparent; }
+.scroll { overflow-y: auto; scrollbar-width: thin; scrollbar-color: #5a5c5f transparent; }
 .scroll::-webkit-scrollbar { width: 8px; }
 .scroll::-webkit-scrollbar-thumb {
-  background: #454545; border-radius: 99px;
+  background: #5a5c5f; border-radius: 99px;
   border: 2px solid transparent; background-clip: content-box;
 }
 [data-theme="light"] .scroll { scrollbar-color: #bdbdbd transparent; }
@@ -85,9 +85,9 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
 .pk-cat-tab:hover:not([data-active]) {
   background: var(--bg-row-hover) !important;
 }
-/* 激活：软 pill，无描边 */
+/* 激活：抬升面，避免与 #303133 主面糊在一起 */
 .pk-cat-tab[data-active] {
-  background: var(--bg-panel) !important;
+  background: var(--bg-elev) !important;
   box-shadow: none;
 }
 .pk-cat-tab[data-active] > span:first-child {
@@ -99,7 +99,7 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   background: var(--bg-row-hover) !important;
 }
 .pk-cat-tab[data-active]:focus-visible {
-  background: var(--bg-panel) !important;
+  background: var(--bg-elev) !important;
 }
 input::placeholder { color: var(--fg-3); opacity: 1; }
 .pk-list-head .t-label,
@@ -154,22 +154,75 @@ input::placeholder { color: var(--fg-3); opacity: 1; }
   }
 }
 
-/* Helper 子进程行背景 —— 深主题压暗，浅主题轻微加灰，避免硬编码 rgba(0,0,0) 在浅色下突兀 */
-[data-theme="dark"] { --bg-helper-row: rgba(0,0,0,0.16); }
-[data-theme="light"] { --bg-helper-row: rgba(0,0,0,0.035); }
+/* Helper 子进程行背景 —— 深主题轻微压暗，浅主题轻微加灰 */
+[data-theme="dark"] { --bg-helper-row: rgba(0, 0, 0, 0.12); }
+[data-theme="light"] { --bg-helper-row: rgba(0, 0, 0, 0.035); }
 
 /* 分类切换 / 排序变化的轻量交叉淡入 —— 设计稿要求 ~120ms */
 .fade-in { animation: pkFade 120ms cubic-bezier(.2,.7,.3,1); }
 @keyframes pkFade { from { opacity: 0; } to { opacity: 1; } }
 
+/* Tab / 首屏加载：骨架行 + opacity 呼吸（状态指示，非整页 spinner） */
+.pk-skeleton {
+  padding: 0;
+  pointer-events: none;
+  user-select: none;
+}
+.pk-skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 12px 0 14px;
+}
+.pk-skeleton-metrics {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
+  flex: none;
+}
+.pk-skeleton-bone {
+  display: block;
+  background: var(--bg-elev);
+  border-radius: 4px;
+  opacity: 0.55;
+  animation: pkSkeletonPulse 1.2s ease-in-out infinite;
+}
+.pk-skeleton-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  flex: none;
+}
+.pk-skeleton-name {
+  height: 11px;
+  flex: none;
+  min-width: 0;
+}
+.pk-skeleton-m {
+  width: 36px;
+  height: 10px;
+  flex: none;
+}
+/* 行间错峰，避免整屏齐闪 */
+.pk-skeleton-row:nth-child(4n + 2) .pk-skeleton-bone { animation-delay: 80ms; }
+.pk-skeleton-row:nth-child(4n + 3) .pk-skeleton-bone { animation-delay: 160ms; }
+.pk-skeleton-row:nth-child(4n + 4) .pk-skeleton-bone { animation-delay: 240ms; }
+@keyframes pkSkeletonPulse {
+  0%, 100% { opacity: 0.38; }
+  50% { opacity: 0.78; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pk-skeleton-bone {
+    animation: none;
+    opacity: 0.55;
+  }
+}
+
 /* meter 宽度动画 */
 .meter-fill { transition: none; }
 
-/* 确认弹窗动画 */
-.scrim { animation: scrimIn 140ms ease-out; }
-@keyframes scrimIn { from { opacity: 0; } to { opacity: 1; } }
-.dialog-card { animation: dialogIn 140ms cubic-bezier(.2,.7,.3,1); }
-@keyframes dialogIn { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: scale(1); } }
 .pk-close-hint:hover:not(:disabled) {
   background: var(--bg-row-hover) !important;
 }

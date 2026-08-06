@@ -47,4 +47,12 @@ describe("高密度列表与键盘焦点", () => {
     expect(listFocus).toBeGreaterThan(globalFocus);
     expect(css.slice(listFocus, listFocus + 100)).toContain("outline: none");
   });
+
+  test("加载态用骨架屏而非「加载中」文案", () => {
+    expect(main).toContain("showSkeleton");
+    expect(main).toContain("pk-skeleton");
+    expect(main).not.toContain("正在读取进程");
+    expect(css).toContain("pkSkeletonPulse");
+    expect(css).toContain("prefers-reduced-motion");
+  });
 });
