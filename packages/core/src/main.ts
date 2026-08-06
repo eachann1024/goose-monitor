@@ -35,13 +35,13 @@ import {
   cycleCategoryIndex,
   rowsForGuiSnapshot,
   searchInputKeyAction,
-  shouldOpenKillDialog,
+  shouldTriggerKill,
   centeredSelectionScroll,
   type ProcessSortKey,
   type ProcessSortDir,
 } from "./shared";
 import { icon } from "./icons";
-import { appIcon, kbd, enterKey, h, highlight } from "./atoms";
+import { appIcon, kbd, h, highlight } from "./atoms";
 import {
   THEME_PREF_KEY,
   applyDataTheme,
@@ -64,7 +64,6 @@ interface State {
   sortDir: SortDir;
   selectedKey: string | null;
   expanded: Set<string>;
-  dialogApp: AppRow | null;
   query: string;
   list: AppRow[]; // 当前分类的原始（未排序未过滤）列表
   loading: boolean;
@@ -114,7 +113,6 @@ class ProcKillApp {
   private recentlyKilled = new Map<string, number>();
   private static readonly KILL_MASK_MS = 4000;
   private killingId: string | null = null;
-  private dialogReturnFocus: HTMLElement | null = null;
   private networkInFlight = false;
   private lastNetworkStart = Number.NEGATIVE_INFINITY;
   private static readonly NETWORK_CADENCE_MS = 5000;
@@ -128,7 +126,7 @@ class ProcKillApp {
   private scroll!: HTMLElement;
   private headGrid!: HTMLElement;
   private emptyEl!: HTMLElement;
-  private dialogLayer!: HTMLElement;     // 弹窗挂载层（持久，内容按需填充）
+  private skeletonEl!: HTMLElement;
 
   // 是否运行在 uTools 环境（用于叠加 uTools 专属视觉）
   private get isUtools(): boolean { return this.bridge.name === "utools"; }
@@ -166,7 +164,6 @@ class ProcKillApp {
       // 每次打开都从当前结果的第一行开始；进程快照变化时仍由会话内选择键保持稳定。
       selectedKey: null,
       expanded: new Set(),
-      dialogApp: null,
       query: restoreQuery(this.bridge.getPref(QUERY_PREF_KEY)),
       list: [],
       loading: true,
@@ -357,7 +354,6 @@ class ProcKillApp {
   private startPolling(): void {
     if (this.refreshTimer != null) return;
     this.refreshTimer = window.setInterval(() => {
-      if (this.s.dialogApp) return;     // 弹窗打开时不刷新，避免选中态跳动
       if (document.hidden) return;      // 窗口隐藏/最小化时不刷新
       if (this.s.cat === "net" && performance.now() - this.lastNetworkStart < ProcKillApp.NETWORK_CADENCE_MS) return;
       void this.load();
@@ -373,7 +369,6 @@ class ProcKillApp {
     try {
       const res = await this.bridge.killProcess(app);
       if (res.ok) {
-        this.s.dialogApp = null;
         // ① 让所有在途 load/polling 响应失效（它们仍含被 kill 的进程，回来会整包写回使其复活）
         ++this.loadSeq;
         // ② 短时遮罩该 id：真实后端进程退出有延迟，接下来一两次刷新仍可能列出它
@@ -389,8 +384,6 @@ class ProcKillApp {
     } finally {
       this.killingId = null;
       this.update();
-      if (!this.s.dialogApp) this.restoreDialogFocus();
-      else window.setTimeout(() => this.dialogLayer.querySelector<HTMLElement>("[data-dialog-primary]")?.focus(), 0);
     }
   }
 
@@ -405,24 +398,10 @@ class ProcKillApp {
     return list.filter((a) => !this.recentlyKilled.has(a.id));
   }
 
+  /** 回车 / 关闭按钮：直接强制结束，无确认弹窗。 */
   private tryKill(app: AppRow | null): void {
     if (!app || this.killingId) return;
-    this.dialogReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    this.s.dialogApp = app;
-    this.update();
-    window.setTimeout(() => this.dialogLayer.querySelector<HTMLElement>("[data-dialog-primary]")?.focus(), 0);
-  }
-
-  private restoreDialogFocus(): void {
-    this.dialogReturnFocus?.focus();
-    this.dialogReturnFocus = null;
-  }
-
-  private closeDialog(): void {
-    if (this.killingId) return;
-    this.s.dialogApp = null;
-    this.update();
-    this.restoreDialogFocus();
+    void this.doKill(app);
   }
 
   private toggleExpand(app: AppRow | null): void {
@@ -533,23 +512,7 @@ class ProcKillApp {
     window.addEventListener("keydown", (e) => {
       const mod = isModKey(e);
       const s = this.s;
-      if (s.dialogApp) {
-        if (e.key === "Escape") { e.preventDefault(); this.closeDialog(); }
-        else if (e.key === "Tab") {
-          const focusable = Array.from(this.dialogLayer.querySelectorAll<HTMLElement>("button, [tabindex]:not([tabindex='-1'])"))
-            .filter((el) => !el.hasAttribute("disabled"));
-          if (focusable.length) {
-            e.preventDefault();
-            const current = focusable.indexOf(document.activeElement as HTMLElement);
-            const next = e.shiftKey
-              ? (current <= 0 ? focusable.length - 1 : current - 1)
-              : (current + 1) % focusable.length;
-            focusable[next].focus();
-          }
-        }
-        return;
-      }
-      // Tab / Shift+Tab：循环切换可见分组（弹窗外全局接管，含搜索框与分类按钮焦点）。
+      // Tab / Shift+Tab：循环切换可见分组（全局接管，含搜索框与分类按钮焦点）。
       if (e.key === "Tab") {
         e.preventDefault();
         this.cycleCategory(e.shiftKey ? -1 : 1);
@@ -565,7 +528,7 @@ class ProcKillApp {
           this.update();
           return;
         }
-        if (action === "native" && !shouldOpenKillDialog(e.key, "search", false)) return;
+        if (action === "native" && !shouldTriggerKill(e.key, "search")) return;
       } else if (target?.closest("input, textarea, select, button, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='checkbox'], [role='tab'], [role='menuitem']")) {
         return;
       }
@@ -616,7 +579,7 @@ class ProcKillApp {
         e.preventDefault();
         const a = this.selApp;
         if (a && s.expanded.has(a.id)) this.toggleExpand(a);
-      } else if (shouldOpenKillDialog(e.key, target === this.searchInput ? "search" : "list", false)) {
+      } else if (shouldTriggerKill(e.key, target === this.searchInput ? "search" : "list")) {
         e.preventDefault();
         this.tryKill(this.selApp);
       } else if (e.key === "r" && mod) {
@@ -659,10 +622,6 @@ class ProcKillApp {
     this.win.appendChild(this.buildHeader());
     this.win.appendChild(this.buildMain());
 
-    // 弹窗层（持久，默认隐藏）
-    this.dialogLayer = h("div");
-    this.win.appendChild(this.dialogLayer);
-
     this.root.appendChild(this.win);
   }
 
@@ -671,7 +630,7 @@ class ProcKillApp {
     const enterLabel = this.bridge.runtimePlatform === "mac" ? "↩" : "Enter";
     this.closeHint = h("button", {
       className: "pk-close-hint",
-      attrs: { type: "button", "aria-label": "关闭当前选中应用（打开确认框）", title: "关闭当前选中应用（始终需要确认）" },
+      attrs: { type: "button", "aria-label": "立即结束当前选中应用", title: "立即结束当前选中应用" },
       style: {
         color: "var(--fg-2)", whiteSpace: "nowrap", marginLeft: "auto", height: "30px",
         display: "inline-flex", alignItems: "center", gap: "6px", padding: "0 8px",
@@ -767,13 +726,43 @@ class ProcKillApp {
       attrs: { id: "pk-scroll", role: "listbox", tabindex: "0", "aria-label": "进程列表，使用上下方向键移动选择，Tab 切换分组" },
       style: { flex: "1 1 auto", minHeight: "0", overflowY: "auto" },
     });
-    // 空态/加载态提示（持久，按需显隐）
+    // 加载骨架（Tab 切换 / 首屏）与文案空态（无数据 / 错误）
+    this.skeletonEl = this.buildSkeleton();
     this.emptyEl = h("div", {
+      className: "pk-empty",
+      attrs: { role: "status" },
       style: { padding: "40px", textAlign: "center", color: "var(--fg-3)", font: "var(--t-sm)", display: "none" },
     });
+    this.scroll.appendChild(this.skeletonEl);
     this.scroll.appendChild(this.emptyEl);
     main.appendChild(this.scroll);
     return main;
+  }
+
+  private buildSkeleton(): HTMLElement {
+    // 名称条宽度错落，避免假列表像对齐的方块墙。
+    const nameWidths = [120, 168, 100, 148, 88, 180, 112, 136];
+    const rows = nameWidths.map((w) => h("div", {
+      className: "pk-skeleton-row",
+      children: [
+        h("span", { className: "pk-skeleton-bone pk-skeleton-icon" }),
+        h("span", { className: "pk-skeleton-bone pk-skeleton-name", style: { width: `${w}px` } }),
+        h("div", { className: "pk-skeleton-metrics", children: [
+          h("span", { className: "pk-skeleton-bone pk-skeleton-m" }),
+          h("span", { className: "pk-skeleton-bone pk-skeleton-m" }),
+          h("span", { className: "pk-skeleton-bone pk-skeleton-m" }),
+        ] }),
+      ],
+    }));
+    return h("div", {
+      className: "pk-skeleton",
+      attrs: {
+        "aria-hidden": "true",
+        role: "presentation",
+      },
+      style: { display: "none" },
+      children: rows,
+    });
   }
 
   private sortHdr(label: string, key: SortKey): HTMLElement {
@@ -824,7 +813,6 @@ class ProcKillApp {
     this.updateTabs();
     this.updateSearchBar();
     this.updateList(v);
-    this.updateDialog();
   }
 
   private updateHeader(v: AppRow[]): void {
@@ -894,9 +882,9 @@ class ProcKillApp {
     const focusSnapshot = this.captureRowFocus();
     if (v.length === 0) this.scroll.removeAttribute("aria-activedescendant");
 
-    // 加载中且无数据：显示加载态，清空行
+    // 加载中且无数据：骨架屏，不用「加载中」文案
     if (s.loading && v.length === 0) {
-      this.showEmpty("正在读取进程…");
+      this.showSkeleton();
       this.clearAllRows();
       this.restoreRowFocus(focusSnapshot, v);
       return;
@@ -913,7 +901,7 @@ class ProcKillApp {
       this.restoreRowFocus(focusSnapshot, v);
       return;
     }
-    this.emptyEl.style.display = "none";
+    this.hideListPlaceholders();
     const selected = this.selApp;
     if (selected) this.scroll.setAttribute("aria-activedescendant", `pk-row-${this.domId(selected.id)}`);
     else this.scroll.removeAttribute("aria-activedescendant");
@@ -965,10 +953,27 @@ class ProcKillApp {
     }
   }
 
+  private showSkeleton(): void {
+    this.emptyEl.style.display = "none";
+    this.emptyEl.textContent = "";
+    this.skeletonEl.style.display = "";
+    this.scroll.setAttribute("aria-busy", "true");
+  }
+
   private showEmpty(msg: string): void {
+    this.skeletonEl.style.display = "none";
+    this.scroll.removeAttribute("aria-busy");
     this.emptyEl.textContent = msg;
     this.emptyEl.style.display = "";
   }
+
+  private hideListPlaceholders(): void {
+    this.skeletonEl.style.display = "none";
+    this.emptyEl.style.display = "none";
+    this.emptyEl.textContent = "";
+    this.scroll.removeAttribute("aria-busy");
+  }
+
   private clearAllRows(): void {
     for (const [, ref] of this.rows) ref.wrap.remove();
     this.rows.clear();
@@ -1228,84 +1233,6 @@ class ProcKillApp {
       }
     }
     return hr;
-  }
-
-  // 弹窗：按需在持久层里建/拆。
-  private updateDialog(): void {
-    const app = this.s.dialogApp;
-    if (!app) { this.dialogLayer.replaceChildren(); return; }
-    this.dialogLayer.replaceChildren(this.buildConfirm(app));
-  }
-
-  private buildConfirm(app: AppRow): HTMLElement {
-    const scrim = h("div", {
-      className: "scrim",
-      attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": "pk-confirm-title" },
-      style: {
-        position: "absolute", inset: "0", background: "rgba(0,0,0,0.56)",
-        backdropFilter: "blur(3px)", display: "grid", placeItems: "center", zIndex: "50",
-      },
-      on: { click: () => this.closeDialog() },
-    });
-    const card = h("div", {
-      className: "dialog-card",
-      style: {
-        width: "372px", maxWidth: "calc(100vw - 24px)", borderRadius: "16px", background: "var(--bg-elev)",
-        border: "1px solid var(--border-2)", boxShadow: "var(--shadow-pop)", padding: "22px",
-      },
-      on: { click: (e) => e.stopPropagation() },
-    });
-
-    const iconWrap = h("span", { style: { position: "relative" } });
-    iconWrap.appendChild(appIcon(app, 46, 12));
-    const badge = h("span", {
-      style: {
-        position: "absolute", right: "-4px", bottom: "-4px", width: "22px", height: "22px",
-        borderRadius: "999px", background: "var(--danger)", display: "grid", placeItems: "center",
-        border: "2px solid var(--bg-elev)",
-      },
-      children: [icon("skull", 12, { color: "#fff" } as any)],
-    });
-    iconWrap.appendChild(badge);
-
-    const titleBox = h("div", { style: { minWidth: "0" }, children: [
-      h("div", { attrs: { id: "pk-confirm-title" }, style: { font: "var(--t-lg)", color: "var(--fg-1)" }, text: `结束 ${app.name}？` }),
-      h("div", { className: "t-path", style: { marginTop: "2px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, text: `PID ${app.pid} · ${app.path}` }),
-    ] });
-
-    card.appendChild(h("div", { style: { display: "flex", alignItems: "center", gap: "13px" }, children: [iconWrap, titleBox] }));
-
-    const p = h("p", { style: { margin: "16px 0 0", font: "var(--t-base)", color: "var(--fg-2)", lineHeight: "1.5" } });
-    p.appendChild(document.createTextNode("这将强制结束该应用及其合并的 "));
-    p.appendChild(h("b", { style: { color: "var(--fg-1)" }, text: `${app.procs} 个进程` }));
-    p.appendChild(document.createTextNode("，未保存的内容可能会丢失。"));
-    card.appendChild(p);
-
-    const cancelBtn = h("button", {
-      style: {
-        flex: "1", height: "38px", borderRadius: "9px", background: "var(--bg-panel)",
-        border: "1px solid var(--border-2)", color: "var(--fg-1)", font: "var(--t-base)",
-        fontWeight: "500", cursor: "pointer", display: "inline-flex", alignItems: "center",
-        justifyContent: "center", gap: "7px",
-      },
-      on: { click: () => this.closeDialog() },
-      children: [document.createTextNode("取消 "), kbd("Esc")],
-    });
-    const killBtn = h("button", {
-      attrs: { "data-dialog-primary": "", ...(this.killingId ? { disabled: "" } : {}) },
-      style: {
-        flex: "1.2", height: "38px", borderRadius: "9px", background: "var(--danger)",
-        border: "none", color: "#fff", font: "var(--t-base)", fontWeight: "600",
-        cursor: this.killingId ? "wait" : "pointer", opacity: this.killingId ? "0.72" : "1",
-        display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "7px",
-      },
-      on: { click: () => this.doKill(app) },
-      children: [document.createTextNode(this.killingId ? "正在结束…" : "关闭 "), ...(this.killingId ? [] : [enterKey()])],
-    });
-    card.appendChild(h("div", { style: { display: "flex", gap: "10px", marginTop: "20px" }, children: [cancelBtn, killBtn] }));
-
-    scrim.appendChild(card);
-    return scrim;
   }
 
   async start(): Promise<void> {

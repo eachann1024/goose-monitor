@@ -115,8 +115,9 @@ export function reconcileSelectionKey(selectedKey: string | null, rows: AppRow[]
 }
 
 export type EnterTarget = "list" | "search" | "interactive";
-export function shouldOpenKillDialog(key: string, target: EnterTarget, dialogOpen: boolean): boolean {
-  return !dialogOpen && key === "Enter" && (target === "list" || target === "search");
+/** Enter 在列表或开发搜索框触发直接结束；交互控件不误触。 */
+export function shouldTriggerKill(key: string, target: EnterTarget): boolean {
+  return key === "Enter" && (target === "list" || target === "search");
 }
 
 export interface CenterScrollInput {

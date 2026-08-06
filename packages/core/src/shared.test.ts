@@ -25,7 +25,7 @@ import {
   rowsForGuiSnapshot,
   searchInputKeyAction,
   sortProcessRows,
-  shouldOpenKillDialog,
+  shouldTriggerKill,
   centeredSelectionScroll,
 } from "./shared";
 import type { AppRow } from "./types";
@@ -205,12 +205,11 @@ describe("列表交互纯逻辑", () => {
     expect(reconcileSelectionKey("missing", [], 0)).toBeNull();
   });
 
-  test("Enter 只从列表或开发搜索框打开确认，交互控件与弹窗态不误触", () => {
-    expect(shouldOpenKillDialog("Enter", "list", false)).toBe(true);
-    expect(shouldOpenKillDialog("Enter", "search", false)).toBe(true);
-    expect(shouldOpenKillDialog("Enter", "interactive", false)).toBe(false);
-    expect(shouldOpenKillDialog("Enter", "list", true)).toBe(false);
-    expect(shouldOpenKillDialog(" ", "list", false)).toBe(false);
+  test("Enter 只从列表或开发搜索框直接结束，交互控件不误触", () => {
+    expect(shouldTriggerKill("Enter", "list")).toBe(true);
+    expect(shouldTriggerKill("Enter", "search")).toBe(true);
+    expect(shouldTriggerKill("Enter", "interactive")).toBe(false);
+    expect(shouldTriggerKill(" ", "list")).toBe(false);
   });
 
   test("选中行越过中线才滚动，并在上下边界 clamp", () => {
