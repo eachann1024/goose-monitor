@@ -5,7 +5,12 @@ const { promisify } = require("node:util");
 const os = require("node:os");
 const path = require("node:path");
 const { inferRole, linuxExecutableFromCommand, findExecutableTreeRootPid } = require("./process-role.cjs");
-const { QUERY_PREF_KEY, resolveEntryQuery } = require("./plugin-state.cjs");
+const {
+  QUERY_PREF_KEY,
+  QUERY_LEFT_AT_PREF_KEY,
+  resolveEntryQuery,
+  resolvePersistedQuery,
+} = require("./plugin-state.cjs");
 const { getVisibleWindowPids } = require("./window-provider.cjs");
 const { collectNettop, probeNettop, aggregateNetworkUsage } = require("./network-provider.cjs");
 
@@ -552,12 +557,20 @@ window.gooseMonitor = {
   }
 
   // 监听插件进入：text 表示无搜索词；regex/over 会带入搜索词。
+  // 关闭超过 5 分钟再进入时清空历史筛选，subInput 与列表都显示全部。
   if (typeof utools.onPluginEnter === "function") {
     utools.onPluginEnter((entry) => {
       // 必须在 setSubInput 前读取；部分宿主会在安装回调时先发送空文本。
-      const savedQuery = typeof utools.dbStorage?.getItem === "function"
-        ? utools.dbStorage.getItem(QUERY_PREF_KEY)
-        : "";
+      let savedQuery = "";
+      if (typeof utools.dbStorage?.getItem === "function") {
+        const rawQuery = utools.dbStorage.getItem(QUERY_PREF_KEY);
+        const leftAt = utools.dbStorage.getItem(QUERY_LEFT_AT_PREF_KEY);
+        savedQuery = resolvePersistedQuery(rawQuery, leftAt);
+        // 过期则写回空串，避免前端 init / 下次进入仍读到旧词。
+        if (savedQuery !== String(rawQuery || "").slice(0, 200)) {
+          try { utools.dbStorage.setItem(QUERY_PREF_KEY, ""); } catch (e) { /* 忽略 */ }
+        }
+      }
       // 每次进入都重新接管子输入框（uTools 退出/再进会清掉上次的 subInput）
       installSubInput();
       const keyword = resolveEntryQuery(entry, savedQuery);
@@ -572,9 +585,12 @@ window.gooseMonitor = {
     installSubInput();
   }
 
-  // 插件退出时移除子输入框接管，避免残留到其它插件/主界面
+  // 插件退出：记离开时间 + 移除子输入框接管，避免残留到其它插件/主界面
   if (typeof utools.onPluginOut === "function") {
     utools.onPluginOut(() => {
+      if (typeof utools.dbStorage?.setItem === "function") {
+        try { utools.dbStorage.setItem(QUERY_LEFT_AT_PREF_KEY, String(Date.now())); } catch (e) { /* 忽略 */ }
+      }
       if (typeof utools.removeSubInput === "function") {
         try { utools.removeSubInput(); } catch (e) { /* 忽略 */ }
       }
