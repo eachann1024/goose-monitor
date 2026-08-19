@@ -1,18 +1,24 @@
 {
-  "name": "prockill",
+  "name": "goose-monitor",
   "pluginName": "鹅的监控 进程管理器",
   "description": "高密度进程管理器。归并应用子进程，支持 uTools 搜索、键盘导航、可见窗口与真实网络速率视图。",
   "author": "鹅的监控",
   "homepage": "https://github.com/eachann1024/goose-monitor",
   "version": "0.1.0",
-  "logo": "logo.png",
-  "main": "index.html",
-  "preload": "preload.js",
+  "logo": "utools/logo.png",
+  "main": "utools-dist/index.html",
+  "preload": "utools/preload.js",
   "features": [
     {
       "code": "prockill",
       "explain": "打开 鹅的监控 进程管理器",
-      "cmds": ["进程管理", "结束进程", "任务管理器", "内存占用", "prockill"]
+      "cmds": [
+        "进程管理",
+        "结束进程",
+        "任务管理器",
+        "内存占用",
+        "prockill"
+      ]
     },
     {
       "code": "prockill-search",
