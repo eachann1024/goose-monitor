@@ -46,6 +46,7 @@ describe("应用图标类型", () => {
     expect(tokens.match(/--app-icon-bg:/g)).toHaveLength(2);
     expect(tokens.match(/--app-icon-border:/g)).toHaveLength(2);
     expect(tokens.match(/--app-icon-fg:/g)).toHaveLength(2);
+    expect(tokens.match(/--port:/g)).toHaveLength(2);
   });
 
   test("末列指标使用统一右边界", () => {

@@ -1,10 +1,10 @@
 /* ProcKill uTools preload —— 在 Node 环境实现进程枚举 / 合并 / kill。
    暴露 window.gooseMonitor 给前端 bridge 调用。源码保持可读（uTools 审核要求，不混淆）。 */
-const { execSync, execFileSync, execFile } = require("node:child_process");
+const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const os = require("node:os");
 const path = require("node:path");
-const { inferRole, linuxExecutableFromCommand, findExecutableTreeRootPid } = require("./process-role.cjs");
+const { inferRole, linuxExecutableFromCommand, findExecutableTreeRootPid, serviceDisplayName, macProcessFields, inheritBundleExecutables } = require("./process-role.cjs");
 const {
   QUERY_PREF_KEY,
   QUERY_LEFT_AT_PREF_KEY,
@@ -13,6 +13,7 @@ const {
 } = require("./plugin-state.cjs");
 const { getVisibleWindowPids } = require("./window-provider.cjs");
 const { collectNettop, probeNettop, aggregateNetworkUsage } = require("./network-provider.cjs");
+const { collectListenPorts, attachListenPorts } = require("./port-provider.cjs");
 
 const execFileAsync = promisify(execFile);
 
@@ -183,21 +184,30 @@ async function attachIcons(rows) {
 
 /* ---- 采集原始进程（异步，不阻塞事件循环）---- */
 async function rawProcsUnix() {
-  // macOS 的 `-o comm=` 输出干净的完整可执行路径（含 .app/），单列即可。
-  // Linux 额外保留 args 供角色识别，但 exe 只取首个可执行路径，避免不同参数拆散同一进程树。
+  // mac comm= 可能是带空格的完整 .app 路径，不能和 args= 写在同一行用 \S+ 切开。
+  // 分两次采：comm 作 exe/name，args 作 commandLine（搜端口 / 认 -jar）。
   if (IS_MAC) {
-    const out = await shAsync("ps", ["-axwwo", "pid=,ppid=,pcpu=,rss=,lstart=,comm="], 32 * 1024 * 1024);
+    const [commOut, argsOut] = await Promise.all([
+      shAsync("ps", ["-axwwo", "pid=,ppid=,pcpu=,rss=,lstart=,comm="], 32 * 1024 * 1024),
+      shAsync("ps", ["-axwwo", "pid=,args="], 32 * 1024 * 1024),
+    ]);
+    const argsByPid = new Map();
+    for (const line of argsOut.split("\n")) {
+      const am = line.match(/^\s*(\d+)\s+(.*)$/);
+      if (am) argsByPid.set(+am[1], (am[2] || "").trim());
+    }
     const list = [];
-    for (const line of out.split("\n")) {
+    for (const line of commOut.split("\n")) {
       const m = line.match(/^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.*)$/);
       if (!m) continue;
-      const exe = m[6].trim();
+      const fields = macProcessFields((m[6] || "").trim(), argsByPid.get(+m[1]) || "");
       list.push({
         pid: +m[1], ppid: +m[2], cpu: parseFloat(m[3]) || 0,
-        memMb: (+m[4]) / 1024, startedAt: m[5], exe, name: path.basename(exe) || exe,
-        commandLine: "",
+        memMb: (+m[4]) / 1024, startedAt: m[5],
+        exe: fields.exe, name: fields.name, commandLine: fields.commandLine,
       });
     }
+    inheritBundleExecutables(list);
     return list;
   }
   // Linux：comm 在前（无空格短名），args 在后（含路径的完整命令行）
@@ -279,13 +289,13 @@ function merge(raw) {
       const rootPid = findExecutableTreeRootPid(p, byPid);
       identity = "exe:" + p.exe;
       key = identity + "#" + rootPid;
-      display = p.name;
+      display = serviceDisplayName(p.name, p.commandLine);
       bundle = p.exe;
       graphical = isGraphicalApp(p.exe);
     } else {
       identity = "name:" + p.name;
       key = identity + "#" + p.pid;
-      display = p.name;
+      display = serviceDisplayName(p.name, p.commandLine);
       bundle = "";
       graphical = false;
     }
@@ -324,6 +334,7 @@ function merge(raw) {
       procs: g.members.length,
       cpu: Math.round(totalCpu * 10) / 10, mem: totalMem,
       pid: main.pid, path: g.bundle || main.exe,
+      commandLine: main.commandLine || "",
       helpers, sys: g.sys || undefined, systemOwned: g.systemOwned || undefined, allPids,
     });
   }
@@ -331,7 +342,15 @@ function merge(raw) {
 }
 
 async function listByCategory(category) {
-  let rows = merge(await rawProcs());
+  const [raw, portsByPid] = await Promise.all([
+    rawProcs(),
+    collectListenPorts().catch((error) => {
+      console.error("[ProcKill] collectListenPorts failed", error);
+      return new Map();
+    }),
+  ]);
+  let rows = merge(raw);
+  attachListenPorts(rows, portsByPid);
 
   if (category === "bg") {
     rows = rows.filter((r) => r.sys);
@@ -380,10 +399,17 @@ function getNetworkCapability() {
 async function getNetworkSnapshot() {
   const sampledAt = Date.now();
   try {
-    const before = await rawProcs();
+    const [before, portsByPid] = await Promise.all([
+      rawProcs(),
+      collectListenPorts().catch((error) => {
+        console.error("[ProcKill] collectListenPorts failed", error);
+        return new Map();
+      }),
+    ]);
     const rates = await collectNettop();
     const after = await rawProcs();
     const rows = merge(after);
+    attachListenPorts(rows, portsByPid);
     const apps = aggregateNetworkUsage(rows, rates, before, after);
     await attachIcons(apps.map((item) => item.app));
     return { status: "supported", sampledAt, windowMs: 1000, apps };
@@ -392,19 +418,13 @@ async function getNetworkSnapshot() {
   }
 }
 
-// 递归收集 pid 的所有后代（Unix；用一次 ps 建父子表，避免 pkill -P 只杀一层）。
-function descendantsUnix(rootPids) {
-  let childMap = new Map();
-  try {
-    const out = execSync("ps -axo pid=,ppid=", { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-    for (const line of out.split("\n")) {
-      const m = line.match(/^\s*(\d+)\s+(\d+)/);
-      if (!m) continue;
-      const pid = +m[1], ppid = +m[2];
-      if (!childMap.has(ppid)) childMap.set(ppid, []);
-      childMap.get(ppid).push(pid);
-    }
-  } catch (_) {}
+// 递归收集 pid 的所有后代（Unix；用本次 killProcess 已拿到的 raw 建父子表，不再 execSync）。
+function descendantsUnix(rootPids, raw) {
+  const childMap = new Map();
+  for (const p of raw) {
+    if (!childMap.has(p.ppid)) childMap.set(p.ppid, []);
+    childMap.get(p.ppid).push(p.pid);
+  }
   const result = new Set();
   const stack = [...rootPids];
   while (stack.length) {
@@ -457,8 +477,8 @@ async function killProcess(id, snapshotToken, pids) {
     });
     for (const p of roots) {
       try {
-        // taskkill /T 递归杀进程树
-        execFileSync("taskkill", ["/T", "/F", "/PID", String(p)], { stdio: "ignore" });
+        // taskkill /T 递归杀进程树（异步，不阻塞事件循环）
+        await execFileAsync("taskkill", ["/T", "/F", "/PID", String(p)], { stdio: "ignore" });
         killed.push(p);
       } catch (e) {
         errors.push(`PID ${p}: ${String((e && e.message) || e)}`);
@@ -466,7 +486,7 @@ async function killProcess(id, snapshotToken, pids) {
     }
   } else {
     // 先递归展开整棵树，再统一 SIGKILL。
-    const all = descendantsUnix(targets).filter((p) => p !== SELF && p > 1);
+    const all = descendantsUnix(targets, raw).filter((p) => p !== SELF && p > 1);
     // 先杀子后杀父，减少重新派生
     all.sort((a, b) => b - a);
     for (const p of all) {
