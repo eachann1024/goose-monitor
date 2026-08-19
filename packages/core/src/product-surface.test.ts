@@ -23,14 +23,20 @@ describe("产品入口收口", () => {
     }
   });
 
-  test("行内结束与旧端口产品面已删除", () => {
+  test("行内结束与旧提醒产品面已删除，端口采集不写进 preload", () => {
     const ui = readFileSync(resolve(root, "packages/core/src/main.ts"), "utf8") +
       readFileSync(resolve(root, "packages/core/styles/app.css"), "utf8") +
       readFileSync(resolve(root, "packages/core/src/category-layout.ts"), "utf8");
-    for (const forbidden of ["pk-row-close", "data-row-action=\"kill\"", "listenPorts", "netstat", "lsof", "pk_dont_remind"]) {
+    for (const forbidden of ["pk-row-close", "data-row-action=\"kill\"", "listenPorts", "pk_dont_remind"]) {
       expect(ui).not.toContain(forbidden);
     }
     const preload = readFileSync(resolve(root, "utools/preload.js"), "utf8");
     for (const forbidden of ["listenPorts", "netstat", "lsof", "r.port"]) expect(preload).not.toContain(forbidden);
+    expect(preload).toContain("port-provider.cjs");
+    expect(preload).toContain("pid=,ppid=,pcpu=,rss=,lstart=,comm=");
+    expect(preload).toContain("pid=,args=");
+    expect(preload).toContain("macProcessFields");
+    expect(preload).toContain("inheritBundleExecutables");
+    expect(preload).not.toContain('pid=,ppid=,pcpu=,rss=,lstart=,args="');
   });
 });

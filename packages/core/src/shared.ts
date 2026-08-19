@@ -191,6 +191,58 @@ export const fmtMem = (mb: number): string =>
 /** CPU 一位小数 + %。 */
 export const fmtCpu = (n: number): string => n.toFixed(1) + "%";
 
+export function formatListenPorts(ports: number[] | undefined): string {
+  if (!ports || !ports.length) return "";
+  return ports.join(" ");
+}
+
+/** `8101` / `:8101` → 端口数字；非法或超范围返回 null。 */
+export function parsePortQuery(query: string): number | null {
+  const match = query.trim().match(/^:?(\d+)$/);
+  if (!match) return null;
+  const port = Number(match[1]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return port;
+}
+
+/** 名称 + 路径 + PID + 端口 + 命令行 + helpers，供普通模糊搜索。 */
+export function searchHaystack(row: AppRow): string {
+  const helpers = (row.helpers || []).map((hp) =>
+    [hp.name, hp.role, hp.pid, formatListenPorts(hp.ports)].join(" ")
+  ).join(" ");
+  return [
+    row.name,
+    row.path,
+    row.pid,
+    formatListenPorts(row.ports),
+    row.commandLine || "",
+    helpers,
+  ].join(" ");
+}
+
+function commandLineHasServerPort(commandLine: string | undefined, port: number): boolean {
+  if (!commandLine) return false;
+  const re = /(?:--server\.port=|-Dserver\.port=)(\d+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(commandLine))) {
+    if (Number(match[1]) === port) return true;
+  }
+  return false;
+}
+
+/** 空 query 全通过；端口查询精确命中 ports / helper.ports / 命令行声明端口；否则模糊搜索 haystack。 */
+export function rowMatchesQuery(row: AppRow, query: string): boolean {
+  const q = query.trim();
+  if (!q) return true;
+  const port = parsePortQuery(q);
+  if (port != null) {
+    if ((row.ports || []).includes(port)) return true;
+    if ((row.helpers || []).some((hp) => (hp.ports || []).includes(port))) return true;
+    return commandLineHasServerPort(row.commandLine, port);
+  }
+  return fuzzyMatch(searchHaystack(row), q);
+}
+
 export const fmtRate = (bytesPerSecond: number): string => {
   if (!Number.isFinite(bytesPerSecond) || bytesPerSecond < 0) return "—";
   if (bytesPerSecond < 1024) return `${Math.round(bytesPerSecond)} B/s`;

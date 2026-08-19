@@ -40,6 +40,18 @@ describe("高密度列表与键盘焦点", () => {
     expect(css).not.toContain(".pk-process-row:focus-within {\n  box-shadow:");
   });
 
+  test("端口浅蓝色常显由设置控制，PID 仅开启后常显", () => {
+    expect(css).toContain("color: var(--port)");
+    expect(css).toContain('.win[data-show-pid="1"] .pk-row-pid');
+    expect(css).toContain('.win[data-show-ports="0"] .pk-row-ports');
+    expect(css).not.toContain(".pk-process-row:hover .pk-row-pid");
+    expect(css).toContain(".pk-row-caret:focus-visible");
+    expect(main).toContain("pk-row-caret");
+    expect(main).toContain("pk-row-ports");
+    expect(main).toContain("formatListenPorts");
+    expect(main).not.toContain("killCommand");
+  });
+
   test("列表接收键盘时不显示整框焦点线", () => {
     const globalFocus = css.indexOf("button:focus-visible, input:focus-visible, [tabindex]:focus-visible");
     const listFocus = css.indexOf(".scroll[tabindex]:focus-visible");

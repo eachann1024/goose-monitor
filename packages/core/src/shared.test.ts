@@ -10,9 +10,13 @@ import {
   fmtCpu,
   fmtMem,
   fmtRate,
+  formatListenPorts,
   fuzzyMatch,
   fuzzyMatchRanges,
   fuzzyMatchScore,
+  parsePortQuery,
+  rowMatchesQuery,
+  searchHaystack,
   isInteractiveKeyboardTag,
   moveSelection,
   normalizeSearchText,
@@ -148,6 +152,58 @@ describe("进程搜索", () => {
       40 + fuzzyMatchScore("/Applications/Chrome.app", "chrome"),
     );
   });
+
+  test("8101 与 :8101 命中已挂端口的 java", () => {
+    const java = row({
+      name: "java", path: "/usr/bin/java", pid: 1700, ports: [8101],
+    });
+    expect(parsePortQuery("8101")).toBe(8101);
+    expect(parsePortQuery(":8101")).toBe(8101);
+    expect(rowMatchesQuery(java, "8101")).toBe(true);
+    expect(rowMatchesQuery(java, ":8101")).toBe(true);
+    expect(searchHaystack(java)).toContain("8101");
+  });
+
+  test(":8101 能命中仅命令行声明端口、ports 为空的行", () => {
+    const java = row({
+      name: "diteng-im-server",
+      path: "/usr/bin/java",
+      pid: 1700,
+      ports: [],
+      commandLine: "/usr/bin/java -jar /opt/diteng-im-server-202409.01.jar --server.port=8101",
+    });
+    expect(rowMatchesQuery(java, ":8101")).toBe(true);
+    expect(rowMatchesQuery(java, "8101")).toBe(true);
+    const dashD = row({
+      ...java,
+      commandLine: "/usr/bin/java -Dserver.port=8101 -jar /opt/app.jar",
+    });
+    expect(rowMatchesQuery(dashD, "8101")).toBe(true);
+  });
+
+  test("810 不误伤 8101", () => {
+    const java = row({
+      name: "java", path: "/usr/bin/java", pid: 1700, ports: [8101],
+      commandLine: "java -jar app.jar --server.port=8101",
+    });
+    expect(parsePortQuery("810")).toBe(810);
+    expect(rowMatchesQuery(java, "810")).toBe(false);
+    expect(rowMatchesQuery(java, ":810")).toBe(false);
+  });
+
+  test("普通名字搜索仍可用，空 query 全通过", () => {
+    const java = row({
+      name: "diteng-im-server", path: "/usr/bin/java", pid: 1700, ports: [8101],
+      commandLine: "java -jar diteng-im-server-202409.01.jar --server.port=8101",
+    });
+    expect(rowMatchesQuery(java, "")).toBe(true);
+    expect(rowMatchesQuery(java, "diteng")).toBe(true);
+    expect(rowMatchesQuery(java, "java")).toBe(true);
+    expect(rowMatchesQuery(java, "chrome")).toBe(false);
+    expect(parsePortQuery("0")).toBeNull();
+    expect(parsePortQuery("65536")).toBeNull();
+    expect(parsePortQuery("java")).toBeNull();
+  });
 });
 
 describe("指标格式化", () => {
@@ -203,6 +259,11 @@ describe("列表交互纯逻辑", () => {
     expect(reconcileSelectionKey("missing", rows, 2)).toBe(processSelectionKey(rows[2]));
     expect(reconcileSelectionKey("missing", rows, 9)).toBe(processSelectionKey(rows[2]));
     expect(reconcileSelectionKey("missing", [], 0)).toBeNull();
+  });
+
+  test("端口只显示数字，空列表不占位", () => {
+    expect(formatListenPorts([5173, 24678])).toBe("5173 24678");
+    expect(formatListenPorts([])).toBe("");
   });
 
   test("Enter 只从列表或开发搜索框直接结束，交互控件不误触", () => {

@@ -8,6 +8,8 @@ export interface Helper {
   cpu: number; // 百分比
   mem: number; // MB
   pid: number;
+  /** 该子进程正在监听的 TCP 端口。 */
+  ports?: number[];
 }
 
 /** 一行 = 一个应用 / 进程组（已合并 Helper）。 */
@@ -31,6 +33,8 @@ export interface AppRow {
   pid: number;
   /** 可执行路径。 */
   path: string;
+  /** 主进程完整命令行（合并组用 main 的 commandLine）。 */
+  commandLine?: string;
   /** 子进程明细。 */
   helpers: Helper[];
   /** 系统/后台进程（图标更小、圆角更小）。 */
@@ -41,6 +45,8 @@ export interface AppRow {
   iconUrl?: string;
   /** 合并组下所有 PID，kill 时需要。 */
   allPids?: number[];
+  /** 组合并后正在监听的 TCP 端口（去重升序）。 */
+  ports?: number[];
 }
 
 export type CategoryId = "all" | "gui" | "cpu" | "mem" | "net" | "bg";

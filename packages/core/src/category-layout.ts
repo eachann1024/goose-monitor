@@ -12,7 +12,7 @@ export interface CategoryColumnLayout {
 const DEFAULT: CategoryColumnLayout = {
   // 只有名称列使用 1fr；指标列按真实内容收紧，宽屏剩余空间全部归名称。
   gridTemplate: "16px minmax(140px,1fr) 44px 56px 60px",
-  nameHdr: "进程 / PID",
+  nameHdr: "进程",
   metrics: ["procs", "cpu", "mem"],
 };
 
@@ -21,17 +21,17 @@ export const LAYOUT_BY_CAT: Record<CategoryId, CategoryColumnLayout> = {
   gui: DEFAULT,
   mem: {
     gridTemplate: DEFAULT.gridTemplate,
-    nameHdr: "进程 / PID",
+    nameHdr: "进程",
     metrics: ["procs", "cpu", "mem"],
   },
   cpu: {
     gridTemplate: DEFAULT.gridTemplate,
-    nameHdr: "进程 / PID",
+    nameHdr: "进程",
     metrics: ["procs", "cpu", "mem"],
   },
   net: {
     gridTemplate: "16px minmax(140px,1fr) 72px 72px 56px 60px",
-    nameHdr: "进程 / PID",
+    nameHdr: "进程",
     metrics: ["download", "upload", "cpu", "mem"],
   },
   bg: {

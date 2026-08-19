@@ -58,6 +58,7 @@ copyFileSync(resolve(utoolsDir, "process-role.cjs"), resolve(out, "process-role.
 copyFileSync(resolve(utoolsDir, "plugin-state.cjs"), resolve(out, "plugin-state.cjs"));
 copyFileSync(resolve(utoolsDir, "window-provider.cjs"), resolve(out, "window-provider.cjs"));
 copyFileSync(resolve(utoolsDir, "network-provider.cjs"), resolve(out, "network-provider.cjs"));
+copyFileSync(resolve(utoolsDir, "port-provider.cjs"), resolve(out, "port-provider.cjs"));
 copyFileSync(resolve(utoolsDir, "plugin.json"), resolve(out, "plugin.json"));
 
 // 3. logo：使用仓库内专用的 256×256 PNG；构建时直接解析 PNG 头验证，跨平台一致。

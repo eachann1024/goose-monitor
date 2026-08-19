@@ -11,7 +11,8 @@ interface Seed {
   id: string; name: string; monogram: string;
   pid: number; path: string; sys?: boolean; systemOwned?: boolean; visible?: boolean;
   cpuBase: number; memBase: number;
-  helpers: Array<{ name: string; role: string; pid: number; cpuBase: number; memBase: number }>;
+  helpers: Array<{ name: string; role: string; pid: number; cpuBase: number; memBase: number; ports?: number[] }>;
+  ports?: number[];
 }
 
 const APP_SEEDS: Seed[] = [
@@ -52,8 +53,8 @@ const SYS_SEEDS: Seed[] = [
   { id: "kernel", name: "kernel_task", monogram: "K", pid: 0, path: "/System", sys: true, cpuBase: 6.4, memBase: 1820, helpers: [] },
   { id: "wsd", name: "WindowServer", monogram: "W", pid: 142, path: "/System/Library/.../WindowServer", sys: true, cpuBase: 5.1, memBase: 980, helpers: [] },
   { id: "mds", name: "mds_stores", monogram: "m", pid: 388, path: "/System/Library/.../mds_stores", sys: true, cpuBase: 1.8, memBase: 240, helpers: [] },
-  { id: "node", name: "node (vite)", monogram: "nd", pid: 4821, path: "~/dev/app/node_modules/.bin/vite", sys: true, cpuBase: 3.2, memBase: 410, helpers: [] },
-  { id: "pg", name: "postgres", monogram: "Pg", pid: 690, path: "/opt/homebrew/.../postgres", sys: true, cpuBase: 0.7, memBase: 256, helpers: [] },
+  { id: "node", name: "node (vite)", monogram: "nd", pid: 4821, path: "~/dev/app/node_modules/.bin/vite", sys: true, cpuBase: 3.2, memBase: 410, ports: [5173, 24678], helpers: [] },
+  { id: "pg", name: "postgres", monogram: "Pg", pid: 690, path: "/opt/homebrew/.../postgres", sys: true, cpuBase: 0.7, memBase: 256, ports: [5432], helpers: [] },
   { id: "ssh", name: "sshd", monogram: "ss", pid: 901, path: "/usr/sbin/sshd", sys: true, cpuBase: 0.1, memBase: 36, helpers: [] },
 ];
 
@@ -65,7 +66,7 @@ function jitter(base: number, ratio: number, max: number): number {
 
 function buildRow(seed: Seed): AppRow {
   const helpers: Helper[] = seed.helpers.map((h) => ({
-    name: h.name, role: h.role, pid: h.pid,
+    name: h.name, role: h.role, pid: h.pid, ports: h.ports,
     cpu: +jitter(h.cpuBase, 0.35, 99).toFixed(1),
     mem: Math.round(jitter(h.memBase, 0.04, 1e9)),
   }));
@@ -83,6 +84,7 @@ function buildRow(seed: Seed): AppRow {
     procs, cpu, mem, pid: seed.pid, path: seed.path, helpers,
     sys: seed.sys, systemOwned: seed.systemOwned || seed.sys,
     allPids: [seed.pid, ...helpers.map((h) => h.pid)],
+    ports: seed.ports,
   };
 }
 

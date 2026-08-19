@@ -22,9 +22,11 @@ import {
   fmtMem,
   fmtCpu,
   fmtRate,
+  formatListenPorts,
   isModKey,
-  fuzzyMatch,
   fuzzyMatchScore,
+  parsePortQuery,
+  rowMatchesQuery,
   moveSelection,
   sortProcessRows,
   processSelectionKey,
@@ -42,6 +44,16 @@ import {
 } from "./shared";
 import { icon } from "./icons";
 import { appIcon, kbd, h, highlight } from "./atoms";
+import {
+  SHOW_PID_PREF_KEY,
+  SHOW_PORTS_PREF_KEY,
+  persistBool,
+  restoreDisplayPrefs,
+  portsVisibleOnPage,
+  buildSettingsPage,
+  type DisplayPrefKey,
+  type SettingsPageRefs,
+} from "./settings";
 import {
   THEME_PREF_KEY,
   applyDataTheme,
@@ -71,6 +83,9 @@ interface State {
   networkUsage: Map<string, NetworkAppUsage>;
   theme: UiTheme;
   themePref: ThemePref;
+  page: "list" | "settings";
+  showPid: boolean;
+  showPorts: boolean;
 }
 
 // 一行复用的节点引用集合（增量更新时按需改这些子节点）。
@@ -79,7 +94,8 @@ interface RowRefs {
   row: HTMLElement;       // 主行
   caret: HTMLButtonElement; // 展开箭头容器
   nameLine: HTMLElement;  // 名称行
-  pathLine: HTMLElement;  // 路径行
+  pathLine: HTMLElement;  // hover 才显示的 PID
+  portsLine: HTMLElement; // 服务端口
   procWrap: HTMLElement;  // 进程数单元
   cpuVal: HTMLElement;
   memVal: HTMLElement;
@@ -127,6 +143,10 @@ class ProcKillApp {
   private headGrid!: HTMLElement;
   private emptyEl!: HTMLElement;
   private skeletonEl!: HTMLElement;
+  private listMain!: HTMLElement;
+  private listToolbar!: HTMLElement;
+  private settingsPage!: SettingsPageRefs;
+  private settingsBtn!: HTMLButtonElement;
 
   // 是否运行在 uTools 环境（用于叠加 uTools 专属视觉）
   private get isUtools(): boolean { return this.bridge.name === "utools"; }
@@ -157,6 +177,10 @@ class ProcKillApp {
           dir: this.bridge.getPref(SORT_DIR_PREF_KEY),
         };
     const initialSort = restoreSort(sortPrefs.key, sortPrefs.dir, initialCategory);
+    const display = restoreDisplayPrefs(
+      this.bridge.getPref(SHOW_PID_PREF_KEY),
+      this.bridge.getPref(SHOW_PORTS_PREF_KEY),
+    );
     this.s = {
       cat: initialCategory,
       sortKey: initialSort.key,
@@ -171,6 +195,9 @@ class ProcKillApp {
       networkUsage: new Map(),
       theme,
       themePref,
+      page: "list",
+      showPid: display.showPid,
+      showPorts: display.showPorts,
     };
     this.refreshResolvedTheme();
   }
@@ -263,14 +290,17 @@ class ProcKillApp {
   }
 
   private searchScore(app: AppRow, query: string): number {
+    if (parsePortQuery(query) != null) return rowMatchesQuery(app, query) ? 0 : Number.POSITIVE_INFINITY;
     const helperScore = app.helpers.reduce((best, hp) => Math.min(
       best,
-      80 + fuzzyMatchScore(`${hp.name} ${hp.role} ${hp.pid}`, query),
+      80 + fuzzyMatchScore(`${hp.name} ${hp.role} ${hp.pid} ${formatListenPorts(hp.ports)}`, query),
     ), Number.POSITIVE_INFINITY);
     return Math.min(
       fuzzyMatchScore(app.name, query),
       20 + fuzzyMatchScore(String(app.pid), query),
+      30 + fuzzyMatchScore(formatListenPorts(app.ports), query),
       40 + fuzzyMatchScore(app.path, query),
+      50 + fuzzyMatchScore(app.commandLine || "", query),
       helperScore,
     );
   }
@@ -279,13 +309,7 @@ class ProcKillApp {
     const q = this.s.query.trim();
     const base = this.s.list;
     if (!q) return base;
-    // 搜索范围：应用名 + 路径 + 每个 Helper 的名称/角色 + PID（搜 "GPU"/PID 都能命中）
-    return base.filter((a) => {
-      const hay =
-        a.name + " " + a.path + " " + a.pid + " " +
-        a.helpers.map((hp) => hp.name + " " + hp.role + " " + hp.pid).join(" ");
-      return fuzzyMatch(hay, q);
-    });
+    return base.filter((a) => rowMatchesQuery(a, q));
   }
 
   private visibleCache: AppRow[] | null = null;
@@ -355,6 +379,7 @@ class ProcKillApp {
     if (this.refreshTimer != null) return;
     this.refreshTimer = window.setInterval(() => {
       if (document.hidden) return;      // 窗口隐藏/最小化时不刷新
+      if (this.killingId) return;       // kill 进行中，跳过轮询避免阻塞放大
       if (this.s.cat === "net" && performance.now() - this.lastNetworkStart < ProcKillApp.NETWORK_CADENCE_MS) return;
       void this.load();
     }, REFRESH_MS);
@@ -508,10 +533,32 @@ class ProcKillApp {
   }
 
   // ---------- 键盘 ----------
+  private setPage(page: "list" | "settings"): void {
+    if (this.s.page === page) return;
+    this.s.page = page;
+    this.update();
+    if (page === "settings") this.settingsPage.back.focus();
+    else this.scroll.focus({ preventScroll: true });
+  }
+
+  private setDisplayPref(key: DisplayPrefKey, value: boolean): void {
+    this.s[key] = value;
+    this.bridge.setPref(key === "showPid" ? SHOW_PID_PREF_KEY : SHOW_PORTS_PREF_KEY, persistBool(value));
+    this.settingsPage.sync({ showPid: this.s.showPid, showPorts: this.s.showPorts });
+    this.update();
+  }
+
   private installKeys(): void {
     window.addEventListener("keydown", (e) => {
       const mod = isModKey(e);
       const s = this.s;
+      if (s.page === "settings") {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          this.setPage("list");
+        }
+        return;
+      }
       // Tab / Shift+Tab：循环切换可见分组（全局接管，含搜索框与分类按钮焦点）。
       if (e.key === "Tab") {
         e.preventDefault();
@@ -579,7 +626,7 @@ class ProcKillApp {
         e.preventDefault();
         const a = this.selApp;
         if (a && s.expanded.has(a.id)) this.toggleExpand(a);
-      } else if (shouldTriggerKill(e.key, target === this.searchInput ? "search" : "list")) {
+      } else if (!e.repeat && shouldTriggerKill(e.key, target === this.searchInput ? "search" : "list")) {
         e.preventDefault();
         this.tryKill(this.selApp);
       } else if (e.key === "r" && mod) {
@@ -590,6 +637,9 @@ class ProcKillApp {
           this.setQuery(""); this.searchInput?.blur();
           this.update();
         }
+      } else if (mod && e.key === ",") {
+        e.preventDefault();
+        this.setPage("settings");
       }
     });
   }
@@ -621,6 +671,12 @@ class ProcKillApp {
 
     this.win.appendChild(this.buildHeader());
     this.win.appendChild(this.buildMain());
+    this.settingsPage = buildSettingsPage(
+      { showPid: this.s.showPid, showPorts: this.s.showPorts },
+      () => this.setPage("list"),
+      (key, value) => this.setDisplayPref(key, value),
+    );
+    this.win.appendChild(this.settingsPage.root);
 
     this.root.appendChild(this.win);
   }
@@ -628,6 +684,12 @@ class ProcKillApp {
   private buildHeader(): HTMLElement {
     const s = this.s;
     const enterLabel = this.bridge.runtimePlatform === "mac" ? "↩" : "Enter";
+    this.settingsBtn = h("button", {
+      className: "pk-settings-btn",
+      attrs: { type: "button", "aria-label": "打开设置", title: "设置" },
+      on: { click: () => this.setPage("settings") },
+      children: [icon("settings", 15, { color: "var(--fg-2)" } as any)],
+    }) as HTMLButtonElement;
     this.closeHint = h("button", {
       className: "pk-close-hint",
       attrs: { type: "button", "aria-label": "立即结束当前选中应用", title: "立即结束当前选中应用" },
@@ -687,19 +749,21 @@ class ProcKillApp {
       this.categoryBtns[c.id] = { btn, label, key };
       tabs.appendChild(btn);
     }
-    return h("header", {
+    this.listToolbar = h("header", {
       className: `pk-toolbar${this.usesEmbeddedSearch ? " pk-toolbar--dev" : ""}`,
       style: {
         height: "42px", flex: "none", display: "flex", alignItems: "center", gap: "8px",
         padding: "0 10px", background: "var(--bg-sidebar)",
       },
-      children: [tabs, this.closeHint, ...(this.usesEmbeddedSearch ? [this.searchBar] : [])],
+      children: [tabs, this.closeHint, ...(this.usesEmbeddedSearch ? [this.searchBar] : []), this.settingsBtn],
     });
+    return this.listToolbar;
   }
 
   private buildMain(): HTMLElement {
     const s = this.s;
     const main = h("main", {
+      className: "pk-list-page",
       style: {
         // minHeight:0 解除 flex item 默认 min-height:auto，
         // 否则内容超高时 .scroll 会被撑开而非内部滚动（uTools Chromium 严格遵守规范，故仅此处复现）。
@@ -736,6 +800,7 @@ class ProcKillApp {
     this.scroll.appendChild(this.skeletonEl);
     this.scroll.appendChild(this.emptyEl);
     main.appendChild(this.scroll);
+    this.listMain = main;
     return main;
   }
 
@@ -803,6 +868,17 @@ class ProcKillApp {
     const v = this.visible;
     const s = this.s;
     this.win.setAttribute("data-category", s.cat);
+    this.win.setAttribute("data-page", s.page);
+    this.win.setAttribute("data-show-pid", s.showPid ? "1" : "0");
+    this.win.setAttribute("data-show-ports", portsVisibleOnPage(s.showPorts, s.cat) ? "1" : "0");
+    const onSettings = s.page === "settings";
+    this.listToolbar.hidden = onSettings;
+    this.listMain.hidden = onSettings;
+    this.settingsPage.root.hidden = !onSettings;
+    if (onSettings) {
+      this.settingsPage.sync({ showPid: s.showPid, showPorts: s.showPorts });
+      return;
+    }
     if (!(s.loading && v.length === 0)) {
       const restored = reconcileSelectionKey(s.selectedKey, v, this.selectionFallbackIndex);
       if (restored !== s.selectedKey) this.setSelectedKey(restored);
@@ -1027,6 +1103,7 @@ class ProcKillApp {
     const wrap = h("div", { className: "pk-app-group" });
 
     const caret = h("button", {
+      className: "pk-row-caret",
       attrs: { type: "button", "data-row-action": "expand", "aria-label": `${a.name} 的子进程`, "aria-expanded": "false" },
       style: {
         width: "16px", height: "16px", display: "grid", placeItems: "center",
@@ -1036,9 +1113,10 @@ class ProcKillApp {
     });
 
     const iconHolder = h("span", { style: { display: "inline-flex" } });
-    const nameLine = h("div", { className: "t-sm", style: { color: "var(--fg-1)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: "0" } });
-    const pathLine = h("span", { className: "pk-row-pid", style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", flex: "none" } });
-    const nameCol = h("div", { style: { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" }, children: [iconHolder, nameLine, pathLine] });
+    const nameLine = h("div", { className: "t-sm pk-row-name", style: { color: "var(--fg-1)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: "0" } });
+    const portsLine = h("span", { className: "pk-row-ports", style: { whiteSpace: "nowrap", flex: "none" } });
+    const pathLine = h("span", { className: "pk-row-pid", style: { font: "400 12px/16px var(--font-mono)", color: "var(--fg-3)", whiteSpace: "nowrap", flex: "none" } });
+    const nameCol = h("div", { className: "pk-row-main", style: { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" }, children: [iconHolder, nameLine, portsLine, pathLine] });
 
     const procWrap = h("div", { className: "num", style: { textAlign: "right" } });
     const cpuVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "right" } });
@@ -1070,7 +1148,7 @@ class ProcKillApp {
     wrap.appendChild(helperBox);
 
     return {
-      wrap, row, caret, nameLine, pathLine, procWrap,
+      wrap, row, caret, nameLine, pathLine, portsLine, procWrap,
       cpuVal, memVal, downloadVal, uploadVal, helperBox, iconHolder,
       signature: "",
     };
@@ -1143,7 +1221,8 @@ class ProcKillApp {
     // 图标字段纳入：真实图标异步补上或系统归属变化时要能重画。
     const q = s.query.trim().toLowerCase();
     const sig = [
-      a.cpu, a.mem, a.procs, a.pid, a.name, a.path,
+      a.cpu, a.mem, a.procs, a.pid, a.name, a.path, (a.ports || []).join(","),
+      s.showPid ? 1 : 0, portsVisibleOnPage(s.showPorts, s.cat) ? 1 : 0,
       this.s.networkUsage.get(processSelectionKey(a))?.downloadBps ?? "",
       this.s.networkUsage.get(processSelectionKey(a))?.uploadBps ?? "",
       a.snapshotToken, (a.allPids || []).join(","),
@@ -1151,7 +1230,7 @@ class ProcKillApp {
       a.sys ? 1 : 0, a.systemOwned ? 1 : 0, a.iconUrl || "",
       q, // 搜索词纳入：改词时已渲染行要重画匹配高亮
       s.cat,
-      a.helpers.map((hp) => `${hp.pid}:${hp.cpu}:${hp.mem}:${hp.name}:${hp.role}`).join(","),
+      a.helpers.map((hp) => `${hp.pid}:${hp.cpu}:${hp.mem}:${hp.name}:${hp.role}:${(hp.ports || []).join(",")}`).join(","),
     ].join("|");
     if (ref.signature === sig) {
       // 仅选中态可能因键盘移动而频繁变；已包含在 sig，无需额外处理
@@ -1190,9 +1269,11 @@ class ProcKillApp {
 
     const lay = layoutForCat(s.cat);
     ref.nameLine.replaceChildren(highlight(a.name, q));
-    ref.pathLine.replaceChildren(document.createTextNode(
-      lay.metrics.includes("path") ? "" : String(a.pid),
-    ));
+    const portsText = portsVisibleOnPage(s.showPorts, s.cat) ? formatListenPorts(a.ports) : "";
+    ref.portsLine.replaceChildren(document.createTextNode(portsText));
+    ref.portsLine.hidden = !portsText;
+    ref.pathLine.replaceChildren(document.createTextNode(s.showPid ? String(a.pid) : ""));
+    ref.pathLine.hidden = !s.showPid;
     this.fillMetricCells(ref, a, lay.metrics);
 
     // 展开的 Helper 行
@@ -1221,7 +1302,13 @@ class ProcKillApp {
     hName.appendChild(highlight(hp.name, q));
     cell.appendChild(hName);
     cell.appendChild(h("span", { style: { font: "var(--t-xs)", color: "var(--fg-3)", padding: "0 5px", borderRadius: "4px", background: "var(--bg-elev)", whiteSpace: "nowrap", flex: "none" }, text: hp.role }));
-    cell.appendChild(h("span", { className: "pk-row-pid", style: { font: "var(--t-mono-sm)", color: "var(--fg-3)", whiteSpace: "nowrap", flex: "none" }, text: String(hp.pid) }));
+    const helperPorts = portsVisibleOnPage(this.s.showPorts, this.s.cat) ? formatListenPorts(hp.ports) : "";
+    if (helperPorts) {
+      cell.appendChild(h("span", { className: "pk-row-ports", style: { whiteSpace: "nowrap", flex: "none" }, text: helperPorts }));
+    }
+    if (this.s.showPid) {
+      cell.appendChild(h("span", { className: "pk-row-pid", style: { font: "400 12px/16px var(--font-mono)", color: "var(--fg-3)", whiteSpace: "nowrap", flex: "none" }, text: String(hp.pid) }));
+    }
     hr.appendChild(cell);
     for (const m of layoutForCat(this.s.cat).metrics) {
       if (m === "cpu") {
