@@ -32,6 +32,8 @@ import {
   shouldTriggerKill,
   normalizeListKey,
   isHostSearchListKey,
+  resolveKillTarget,
+  hostEnterShouldKill,
   centeredSelectionScroll,
 } from "./shared";
 import type { AppRow } from "./types";
@@ -307,6 +309,13 @@ describe("列表交互纯逻辑", () => {
     expect(searchInputKeyAction("Return")).toBe("native");
   });
 
+  test("回车结束当前选中，没有选中时用第一条可见行", () => {
+    const rows = [row({ id: "first" }), row({ id: "second" })];
+    expect(resolveKillTarget(rows[1], rows)?.id).toBe("second");
+    expect(resolveKillTarget(null, rows)?.id).toBe("first");
+    expect(resolveKillTarget(undefined, [])).toBeNull();
+  });
+
   test("宿主子输入框转发的 Return/上下键交给列表，不误伤交互控件", () => {
     expect(normalizeListKey("Return")).toBe("Enter");
     expect(normalizeListKey("Up")).toBe("ArrowUp");
@@ -319,5 +328,13 @@ describe("列表交互纯逻辑", () => {
     expect(isHostSearchListKey("a")).toBe(false);
     expect(isHostSearchListKey("Escape")).toBe(false);
     expect(isHostSearchListKey("ArrowLeft")).toBe(false);
+  });
+
+  test("子输入框回车只在列表页且非交互控件时结束", () => {
+    expect(hostEnterShouldKill("Enter", "list", false)).toBe(true);
+    expect(hostEnterShouldKill("Return", "list", false)).toBe(true);
+    expect(hostEnterShouldKill("Enter", "list", true)).toBe(false);
+    expect(hostEnterShouldKill("Enter", "settings", false)).toBe(false);
+    expect(hostEnterShouldKill("ArrowDown", "list", false)).toBe(false);
   });
 });

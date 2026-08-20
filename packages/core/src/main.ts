@@ -40,6 +40,8 @@ import {
   shouldTriggerKill,
   normalizeListKey,
   isHostSearchListKey,
+  resolveKillTarget,
+  hostEnterShouldKill,
   centeredSelectionScroll,
   type ProcessSortKey,
   type ProcessSortDir,
@@ -550,6 +552,13 @@ class ProcKillApp {
     this.update();
   }
 
+  private blurPluginChrome(): void {
+    const ae = document.activeElement;
+    if (!(ae instanceof HTMLElement)) return;
+    if (ae === document.body || ae === this.searchInput) return;
+    ae.blur();
+  }
+
   private installKeys(): void {
     window.addEventListener("keydown", (e) => {
       const mod = isModKey(e);
@@ -581,8 +590,9 @@ class ProcKillApp {
           return;
         }
         if (action === "native" && !shouldTriggerKill(e.key, "search")) return;
-      } else if (!hostSearchList && target?.closest("input, textarea, select, button, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='checkbox'], [role='tab'], [role='menuitem']")) {
-        return;
+      } else if (target?.closest("input, textarea, select, button, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='checkbox'], [role='tab'], [role='menuitem']")) {
+        // 上下键：宿主转发时即使残留按钮焦点也要改选中。回车不误触设置等控件。
+        if (!(hostSearchList && (key === "ArrowUp" || key === "ArrowDown"))) return;
       }
       // ⌘/Ctrl + 1–5 切换固定分类。
       if (mod && e.key >= "1" && e.key <= String(this.categories.length)) {
@@ -606,23 +616,12 @@ class ProcKillApp {
         return;
       }
       const v = this.visible;
-      const current = s.selectedKey
-        ? v.findIndex((row) => processSelectionKey(row) === s.selectedKey)
-        : -1;
       if (key === "ArrowDown") {
         e.preventDefault();
-        const next = moveSelection(current, 1, v.length);
-        this.setSelectedKey(next >= 0 ? processSelectionKey(v[next]) : null);
-        this.selectionFallbackIndex = Math.max(0, next);
-        this.pendingScrollDirection = 1;
-        this.update();
+        this.moveSel(1);
       } else if (key === "ArrowUp") {
         e.preventDefault();
-        const next = moveSelection(current, -1, v.length);
-        this.setSelectedKey(next >= 0 ? processSelectionKey(v[next]) : null);
-        this.selectionFallbackIndex = Math.max(0, next);
-        this.pendingScrollDirection = -1;
-        this.update();
+        this.moveSel(-1);
       } else if (key === "ArrowRight") {
         e.preventDefault();
         const a = this.selApp;
@@ -631,9 +630,9 @@ class ProcKillApp {
         e.preventDefault();
         const a = this.selApp;
         if (a && s.expanded.has(a.id)) this.toggleExpand(a);
-      } else if (!e.repeat && shouldTriggerKill(e.key, (target === this.searchInput || hostSearchList) ? "search" : "list")) {
+      } else if (!e.repeat && (target === this.searchInput ? shouldTriggerKill(e.key, "search") : hostEnterShouldKill(e.key, "list", false))) {
         e.preventDefault();
-        this.tryKill(this.selApp ?? v[0] ?? null);
+        this.tryKill(resolveKillTarget(this.selApp, v));
       } else if (e.key === "r" && mod) {
         e.preventDefault();
         this.load();
@@ -646,7 +645,7 @@ class ProcKillApp {
         e.preventDefault();
         this.setPage("settings");
       }
-    });
+    }, true);
   }
 
   // uTools 工具栈钩子：带词进入 / 顶部子输入框驱动搜索。
@@ -655,21 +654,46 @@ class ProcKillApp {
     // 进入插件：先按 uTools 当前主题校准（auto 模式），再带词进入。
     w.__prockillEnter = (keyword: string) => {
       this.syncAutoTheme();
+      this.blurPluginChrome();
       this.setSearch(typeof keyword === "string" ? keyword : "", true);
     };
     // uTools 顶部子输入框实时驱动过滤（text 可能为空 → 清空过滤）。
     w.__prockillSubInput = (text: string) => {
       const q = typeof text === "string" ? text : "";
+      this.blurPluginChrome();
       this.setQuery(q);
       this.update();
+    };
+    // 宿主捕获回车 / 子输入框回车：结束当前选中，否则第一条可见行。
+    w.__prockillTryKill = () => {
+      if (this.s.page === "settings") return;
+      this.tryKill(resolveKillTarget(this.selApp, this.visible));
+    };
+    w.__prockillMoveSel = (delta: number) => {
+      this.moveSel(delta < 0 ? -1 : 1);
     };
     // 少数宿主提供子输入框回车回调；不抢焦点，只结束当前/第一条。
     w.__prockillHostKey = (key: string) => {
       if (!isHostSearchListKey(key)) return;
       if (this.s.page === "settings") return;
-      if (normalizeListKey(key) !== "Enter") return;
-      this.tryKill(this.selApp ?? this.visible[0] ?? null);
+      const normalized = normalizeListKey(key);
+      if (normalized === "Enter") w.__prockillTryKill();
+      else if (normalized === "ArrowUp") this.moveSel(-1);
+      else if (normalized === "ArrowDown") this.moveSel(1);
     };
+  }
+
+  private moveSel(direction: -1 | 1): void {
+    if (this.s.page === "settings") return;
+    const v = this.visible;
+    const current = this.s.selectedKey
+      ? v.findIndex((row) => processSelectionKey(row) === this.s.selectedKey)
+      : -1;
+    const next = moveSelection(current, direction, v.length);
+    this.setSelectedKey(next >= 0 ? processSelectionKey(v[next]) : null);
+    this.selectionFallbackIndex = Math.max(0, next);
+    this.pendingScrollDirection = direction;
+    this.update();
   }
 
   // ============================================================

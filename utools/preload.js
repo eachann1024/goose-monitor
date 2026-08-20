@@ -533,6 +533,31 @@ window.gooseMonitor = {
   // 非 uTools 环境（开发态）utools 不存在，直接返回，不报错
   if (typeof utools === "undefined" || !utools) return;
 
+  // 捕获阶段接管回车/上下：焦点在宿主搜索框时，页面 bubble 监听可能收不到。
+  // 只处理 Enter / 方向键；普通字符绝不 preventDefault，避免打断打字。
+  window.addEventListener("keydown", function onHostCaptureKey(e) {
+    if (!e || e.repeat) return;
+    var key = e.key;
+    var isEnter = key === "Enter" || key === "Return";
+    var isUp = key === "ArrowUp" || key === "Up";
+    var isDown = key === "ArrowDown" || key === "Down";
+    if (!isEnter && !isUp && !isDown) return;
+    var target = e.target;
+    // 插件内按钮/链接等交互控件不抢；input 留给宿主/开发搜索框，回车直接结束。
+    if (target && target.closest && target.closest("button, textarea, select, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='checkbox'], [role='tab'], [role='menuitem']")) {
+      return;
+    }
+    if (isEnter) {
+      if (typeof window.__prockillTryKill === "function") {
+        try { window.__prockillTryKill(); } catch (err) { console.error("[ProcKill] __prockillTryKill 调用失败", err); }
+      }
+      return;
+    }
+    if (typeof window.__prockillMoveSel === "function") {
+      try { window.__prockillMoveSel(isUp ? -1 : 1); } catch (err) { console.error("[ProcKill] __prockillMoveSel 调用失败", err); }
+    }
+  }, true);
+
   // 把初始关键词交给前端过滤。前端钩子可能晚于 preload 注册，
   // 故做一次轮询重试，命中即停（最多约 3 秒），避免进入瞬间钩子尚未挂载而丢词。
   // 用单一 timer + pending 关键词：多次快速进入只保留最后一次，避免并存的多个 timer
@@ -579,8 +604,8 @@ window.gooseMonitor = {
       if (typeof utools.onSubInputEnter === "function") {
         try {
           utools.onSubInputEnter(() => {
-            if (typeof window.__prockillHostKey === "function") {
-              try { window.__prockillHostKey("Enter"); } catch (e) { console.error("[ProcKill] __prockillHostKey 调用失败", e); }
+            if (typeof window.__prockillTryKill === "function") {
+              try { window.__prockillTryKill(); } catch (e) { console.error("[ProcKill] __prockillTryKill 调用失败", e); }
             }
           });
         } catch (e) { /* 宿主未实现则忽略 */ }
@@ -630,4 +655,28 @@ window.gooseMonitor = {
       }
     });
   }
+
+  // 捕获阶段听回车：子输入框若把 Enter 转进插件页面，这里比按钮默认动作更早。
+  // 设置按钮等交互控件上的回车不结束进程。不抢输入焦点。
+  var INTERACTIVE = "input, textarea, select, button, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='checkbox'], [role='tab'], [role='menuitem']";
+  function isInteractiveEnterTarget(target) {
+    if (!target) return false;
+    if (typeof target.closest === "function" && target.closest(INTERACTIVE)) return true;
+    var tag = String(target.tagName || "").toUpperCase();
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON" || tag === "A";
+  }
+  function onCaptureEnter(e) {
+    if (!e || e.repeat || e.isComposing) return;
+    var key = e.key || "";
+    if (key !== "Enter" && key !== "Return") return;
+    if (isInteractiveEnterTarget(e.target)) return;
+    if (typeof window.__prockillTryKill !== "function") return;
+    try {
+      e.preventDefault();
+      window.__prockillTryKill();
+    } catch (err) {
+      console.error("[ProcKill] __prockillTryKill 调用失败", err);
+    }
+  }
+  window.addEventListener("keydown", onCaptureEnter, true);
 })();

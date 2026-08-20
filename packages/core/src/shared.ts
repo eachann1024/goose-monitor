@@ -138,6 +138,21 @@ export function isHostSearchListKey(key: string): boolean {
   return normalized === "Enter" || normalized === "ArrowUp" || normalized === "ArrowDown";
 }
 
+/** 回车结束目标：当前选中，否则第一条可见行。 */
+export function resolveKillTarget<T>(selected: T | null | undefined, visible: readonly T[]): T | null {
+  return selected ?? visible[0] ?? null;
+}
+
+/** 子输入框回车：仅列表页、且焦点不在交互控件时结束进程。 */
+export function hostEnterShouldKill(
+  key: string,
+  page: "list" | "settings",
+  targetInteractive: boolean,
+): boolean {
+  if (page !== "list" || targetInteractive) return false;
+  return shouldTriggerKill(key, "search");
+}
+
 export interface CenterScrollInput {
   scrollTop: number;
   clientHeight: number;
