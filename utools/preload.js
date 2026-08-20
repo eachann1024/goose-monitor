@@ -1,3 +1,7 @@
+if (window.ztools) {
+  window.utools = window.ztools
+}
+
 /* ProcKill uTools preload —— 在 Node 环境实现进程枚举 / 合并 / kill。
    暴露 window.gooseMonitor 给前端 bridge 调用。源码保持可读（uTools 审核要求，不混淆）。 */
 const { execFile } = require("node:child_process");
