@@ -114,10 +114,28 @@ export function reconcileSelectionKey(selectedKey: string | null, rows: AppRow[]
   return processSelectionKey(rows[index]);
 }
 
+/** Electron / 宿主子输入框转发时常用 Return、Up、Down，统一成标准键名。 */
+export function normalizeListKey(key: string): string {
+  switch (key) {
+    case "Return": return "Enter";
+    case "Up": return "ArrowUp";
+    case "Down": return "ArrowDown";
+    case "Left": return "ArrowLeft";
+    case "Right": return "ArrowRight";
+    default: return key;
+  }
+}
+
 export type EnterTarget = "list" | "search" | "interactive";
-/** Enter 在列表或开发搜索框触发直接结束；交互控件不误触。 */
+/** Enter（含宿主转发的 Return）在列表或搜索触发直接结束；交互控件不误触。 */
 export function shouldTriggerKill(key: string, target: EnterTarget): boolean {
-  return key === "Enter" && (target === "list" || target === "search");
+  return normalizeListKey(key) === "Enter" && (target === "list" || target === "search");
+}
+
+/** 宿主子输入框会转给插件的列表键：回车与上下。打字时光标键仍留给输入框。 */
+export function isHostSearchListKey(key: string): boolean {
+  const normalized = normalizeListKey(key);
+  return normalized === "Enter" || normalized === "ArrowUp" || normalized === "ArrowDown";
 }
 
 export interface CenterScrollInput {
@@ -149,8 +167,9 @@ export type SearchInputKeyAction = "native" | "clear" | "navigate";
 
 /** 搜索框仅把 Esc 与上下键交给列表，其余输入和光标键保持原生。 */
 export function searchInputKeyAction(key: string): SearchInputKeyAction {
-  if (key === "Escape") return "clear";
-  if (key === "ArrowDown" || key === "ArrowUp") return "navigate";
+  const normalized = normalizeListKey(key);
+  if (normalized === "Escape") return "clear";
+  if (normalized === "ArrowDown" || normalized === "ArrowUp") return "navigate";
   return "native";
 }
 

@@ -38,6 +38,8 @@ import {
   rowsForGuiSnapshot,
   searchInputKeyAction,
   shouldTriggerKill,
+  normalizeListKey,
+  isHostSearchListKey,
   centeredSelectionScroll,
   type ProcessSortKey,
   type ProcessSortDir,
@@ -566,7 +568,10 @@ class ProcKillApp {
         return;
       }
       // 搜索框保留普通输入/左右键，只把 Esc 与上下键交给结果列表。
+      // 宿主子输入框会把 Return/Up/Down 转进插件；此时不要因分类按钮等残留焦点丢掉。
       const target = e.target instanceof HTMLElement ? e.target : null;
+      const key = normalizeListKey(e.key);
+      const hostSearchList = this.isUtools && isHostSearchListKey(e.key);
       if (target === this.searchInput) {
         const action = searchInputKeyAction(e.key);
         if (action === "clear") {
@@ -576,7 +581,7 @@ class ProcKillApp {
           return;
         }
         if (action === "native" && !shouldTriggerKill(e.key, "search")) return;
-      } else if (target?.closest("input, textarea, select, button, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='checkbox'], [role='tab'], [role='menuitem']")) {
+      } else if (!hostSearchList && target?.closest("input, textarea, select, button, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='checkbox'], [role='tab'], [role='menuitem']")) {
         return;
       }
       // ⌘/Ctrl + 1–5 切换固定分类。
@@ -604,31 +609,31 @@ class ProcKillApp {
       const current = s.selectedKey
         ? v.findIndex((row) => processSelectionKey(row) === s.selectedKey)
         : -1;
-      if (e.key === "ArrowDown") {
+      if (key === "ArrowDown") {
         e.preventDefault();
         const next = moveSelection(current, 1, v.length);
         this.setSelectedKey(next >= 0 ? processSelectionKey(v[next]) : null);
         this.selectionFallbackIndex = Math.max(0, next);
         this.pendingScrollDirection = 1;
         this.update();
-      } else if (e.key === "ArrowUp") {
+      } else if (key === "ArrowUp") {
         e.preventDefault();
         const next = moveSelection(current, -1, v.length);
         this.setSelectedKey(next >= 0 ? processSelectionKey(v[next]) : null);
         this.selectionFallbackIndex = Math.max(0, next);
         this.pendingScrollDirection = -1;
         this.update();
-      } else if (e.key === "ArrowRight") {
+      } else if (key === "ArrowRight") {
         e.preventDefault();
         const a = this.selApp;
         if (a && a.helpers.length && !s.expanded.has(a.id)) this.toggleExpand(a);
-      } else if (e.key === "ArrowLeft") {
+      } else if (key === "ArrowLeft") {
         e.preventDefault();
         const a = this.selApp;
         if (a && s.expanded.has(a.id)) this.toggleExpand(a);
-      } else if (!e.repeat && shouldTriggerKill(e.key, target === this.searchInput ? "search" : "list")) {
+      } else if (!e.repeat && shouldTriggerKill(e.key, (target === this.searchInput || hostSearchList) ? "search" : "list")) {
         e.preventDefault();
-        this.tryKill(this.selApp);
+        this.tryKill(this.selApp ?? v[0] ?? null);
       } else if (e.key === "r" && mod) {
         e.preventDefault();
         this.load();
@@ -657,6 +662,13 @@ class ProcKillApp {
       const q = typeof text === "string" ? text : "";
       this.setQuery(q);
       this.update();
+    };
+    // 少数宿主提供子输入框回车回调；不抢焦点，只结束当前/第一条。
+    w.__prockillHostKey = (key: string) => {
+      if (!isHostSearchListKey(key)) return;
+      if (this.s.page === "settings") return;
+      if (normalizeListKey(key) !== "Enter") return;
+      this.tryKill(this.selApp ?? this.visible[0] ?? null);
     };
   }
 
