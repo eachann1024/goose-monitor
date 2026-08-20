@@ -30,6 +30,8 @@ import {
   searchInputKeyAction,
   sortProcessRows,
   shouldTriggerKill,
+  normalizeListKey,
+  isHostSearchListKey,
   centeredSelectionScroll,
 } from "./shared";
 import type { AppRow } from "./types";
@@ -271,6 +273,9 @@ describe("列表交互纯逻辑", () => {
     expect(shouldTriggerKill("Enter", "search")).toBe(true);
     expect(shouldTriggerKill("Enter", "interactive")).toBe(false);
     expect(shouldTriggerKill(" ", "list")).toBe(false);
+    expect(shouldTriggerKill("Return", "list")).toBe(true);
+    expect(shouldTriggerKill("Return", "search")).toBe(true);
+    expect(shouldTriggerKill("Return", "interactive")).toBe(false);
   });
 
   test("选中行越过中线才滚动，并在上下边界 clamp", () => {
@@ -297,5 +302,22 @@ describe("列表交互纯逻辑", () => {
     expect(searchInputKeyAction("ArrowLeft")).toBe("native");
     expect(searchInputKeyAction("ArrowRight")).toBe("native");
     expect(searchInputKeyAction("a")).toBe("native");
+    expect(searchInputKeyAction("Up")).toBe("navigate");
+    expect(searchInputKeyAction("Down")).toBe("navigate");
+    expect(searchInputKeyAction("Return")).toBe("native");
+  });
+
+  test("宿主子输入框转发的 Return/上下键交给列表，不误伤交互控件", () => {
+    expect(normalizeListKey("Return")).toBe("Enter");
+    expect(normalizeListKey("Up")).toBe("ArrowUp");
+    expect(normalizeListKey("Down")).toBe("ArrowDown");
+    expect(normalizeListKey("Enter")).toBe("Enter");
+    expect(isHostSearchListKey("Return")).toBe(true);
+    expect(isHostSearchListKey("Enter")).toBe(true);
+    expect(isHostSearchListKey("Down")).toBe(true);
+    expect(isHostSearchListKey("ArrowUp")).toBe(true);
+    expect(isHostSearchListKey("a")).toBe(false);
+    expect(isHostSearchListKey("Escape")).toBe(false);
+    expect(isHostSearchListKey("ArrowLeft")).toBe(false);
   });
 });

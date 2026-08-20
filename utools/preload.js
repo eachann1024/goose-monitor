@@ -575,6 +575,16 @@ window.gooseMonitor = {
           try { window.__prockillSubInput(text || ""); } catch (e) { console.error("[ProcKill] __prockillSubInput 调用失败", e); }
         }
       }, "过滤应用或进程…", true);
+      // 官方 API 只有 onChange；若宿主另有回车回调则转给前端，不抢输入焦点。
+      if (typeof utools.onSubInputEnter === "function") {
+        try {
+          utools.onSubInputEnter(() => {
+            if (typeof window.__prockillHostKey === "function") {
+              try { window.__prockillHostKey("Enter"); } catch (e) { console.error("[ProcKill] __prockillHostKey 调用失败", e); }
+            }
+          });
+        } catch (e) { /* 宿主未实现则忽略 */ }
+      }
     } catch (e) {
       console.error("[ProcKill] setSubInput 失败", e);
     }
