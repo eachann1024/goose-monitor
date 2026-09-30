@@ -2,6 +2,7 @@
   "name": "prockill",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "description": "鹅的监控 — uTools 进程管理插件",
   "scripts": {
