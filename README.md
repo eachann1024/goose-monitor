@@ -1,16 +1,10 @@
-> **已迁入 [Goose Hub](/Users/eachann/Work/goose-hub)。** 数据目录为 `~/.config/monitor`。本仓库的 uTools 版以 tag `utools-last` 冻结，需要回滚时检出该 tag。
-
 # 鹅的监控
 
 按应用归并 Electron / Chrome Helper。搜到回车就杀，输入 `8101` 能找到谁占了这个端口。
 
 ## 视频介绍
 
-[![中文产品介绍视频](docs/media/product-intro-cover.png)](https://github.com/eachann1024/goose-monitor/raw/refs/heads/main/docs/media/product-intro-zh.mp4)
-
-[观看／下载 MP4](https://github.com/eachann1024/goose-monitor/raw/refs/heads/main/docs/media/product-intro-zh.mp4) · 中文旁白 · 1080p · 41 秒
-
-**源码界面预览·虚构进程数据**。展示应用与 Helper 归组、资源排序、虚构端口搜索及界面与网络分类。基于 goose-monitor `a4140661c490059c122061a6099033e29ec7832e` 与 Hub `f298eb8936e57073f2e34bd59bf211e8ee9ba66a`；未采样或结束真实进程，原生确认与快照复核依据源码说明。
+https://github.com/user-attachments/assets/9b0afbed-f925-439e-8a8c-9c35b41bc937
 
 ## 大功能
 
