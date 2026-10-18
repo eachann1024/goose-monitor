@@ -528,36 +528,17 @@ window.gooseMonitor = {
      · window.__prockillEnter(keyword: string)   —— 进入时调用一次，keyword 为初始搜索词（无词时传 ""）
      · window.__prockillSubInput(text: string)    —— uTools 子输入框每次变化时调用并实时过滤
    注意：preload 与插件页面共享同一个 window，故可直接读写 window.__prockill*。
+   ⚠️ 键盘事件（回车 / 上下）只由前端 main.ts 接管一次，preload 不得再注册 keydown，
+      否则同一事件被处理两遍（按一次 ↓ 跳两行）。
    ============================================================ */
 (function setupUtoolsBridge() {
   // 非 uTools 环境（开发态）utools 不存在，直接返回，不报错
   if (typeof utools === "undefined" || !utools) return;
 
-  // 捕获阶段接管回车/上下：焦点在宿主搜索框时，页面 bubble 监听可能收不到。
-  // 只处理 Enter / 方向键；普通字符绝不 preventDefault，避免打断打字。
-  window.addEventListener("keydown", function onHostCaptureKey(e) {
-    if (!e || e.repeat) return;
-    var key = e.key;
-    var isEnter = key === "Enter" || key === "Return";
-    var isUp = key === "ArrowUp" || key === "Up";
-    var isDown = key === "ArrowDown" || key === "Down";
-    if (!isEnter && !isUp && !isDown) return;
-    var target = e.target;
-    // 插件内按钮/链接等交互控件不抢；input 留给宿主/开发搜索框，回车直接结束。
-    if (target && target.closest && target.closest("button, textarea, select, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='checkbox'], [role='tab'], [role='menuitem']")) {
-      return;
-    }
-    if (isEnter) {
-      if (typeof window.__prockillTryKill === "function") {
-        try { window.__prockillTryKill(); } catch (err) { console.error("[ProcKill] __prockillTryKill 调用失败", err); }
-      }
-      return;
-    }
-    if (typeof window.__prockillMoveSel === "function") {
-      try { window.__prockillMoveSel(isUp ? -1 : 1); } catch (err) { console.error("[ProcKill] __prockillMoveSel 调用失败", err); }
-    }
-  }, true);
-
+  // 回车 / 上下键统一由前端 main.ts 的 window 捕获监听处理（它已在捕获阶段处理
+  // 宿主转发进来的 Return/Up/Down，并区分搜索框、交互控件与列表页）。
+  // preload 与页面共享同一个 window，这里若再接管一次，同一事件会被处理两遍：
+  // 按一次 ↓ 就跳两行、回车会连发两次结束。故此处不注册任何按键监听。
   // 把初始关键词交给前端过滤。前端钩子可能晚于 preload 注册，
   // 故做一次轮询重试，命中即停（最多约 3 秒），避免进入瞬间钩子尚未挂载而丢词。
   // 用单一 timer + pending 关键词：多次快速进入只保留最后一次，避免并存的多个 timer
@@ -656,27 +637,4 @@ window.gooseMonitor = {
     });
   }
 
-  // 捕获阶段听回车：子输入框若把 Enter 转进插件页面，这里比按钮默认动作更早。
-  // 设置按钮等交互控件上的回车不结束进程。不抢输入焦点。
-  var INTERACTIVE = "input, textarea, select, button, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='checkbox'], [role='tab'], [role='menuitem']";
-  function isInteractiveEnterTarget(target) {
-    if (!target) return false;
-    if (typeof target.closest === "function" && target.closest(INTERACTIVE)) return true;
-    var tag = String(target.tagName || "").toUpperCase();
-    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON" || tag === "A";
-  }
-  function onCaptureEnter(e) {
-    if (!e || e.repeat || e.isComposing) return;
-    var key = e.key || "";
-    if (key !== "Enter" && key !== "Return") return;
-    if (isInteractiveEnterTarget(e.target)) return;
-    if (typeof window.__prockillTryKill !== "function") return;
-    try {
-      e.preventDefault();
-      window.__prockillTryKill();
-    } catch (err) {
-      console.error("[ProcKill] __prockillTryKill 调用失败", err);
-    }
-  }
-  window.addEventListener("keydown", onCaptureEnter, true);
 })();
