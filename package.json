@@ -9,7 +9,7 @@
     "dev": "node node_modules/vite/bin/vite.js",
     "build": "bun run build:utools",
     "build:frontend": "node node_modules/vite/bin/vite.js build --mode utools",
-    "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
+    "typecheck": "node scripts/typecheck.mjs --noEmit",
     "check:versions": "node scripts/check-versions.mjs",
     "check": "bun run check:versions && bun run typecheck && bun run build:utools",
     "preview": "node node_modules/vite/bin/vite.js preview",
@@ -20,6 +20,7 @@
   "devDependencies": {
     "@types/bun": "^1.3.14",
     "esbuild": "^0.28.1",
+    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
     "typescript": "^7.0.2",
     "vite": "^8.0.16"
   },
