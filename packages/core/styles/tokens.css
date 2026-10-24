@@ -132,8 +132,11 @@
   --shadow-window: 0 24px 70px rgba(0, 0, 0, 0.18), 0 0 0 1px #d5d5d5;
 }
 
-/* 吸附在 uTools 搜索框下：整面铺成 #f4f4f4。分离后的独立窗口不带这个类，继续用上面的层级色。 */
-html.utools-attached[data-theme="light"] {
+/* 吸附在 uTools 搜索框下：整面铺成 #f4f4f4。
+   body / .win 自己也写了 data-theme，会重新声明这些变量；必须连子节点一起覆盖。
+   分离后的独立窗口不带这个类，继续用上面的层级色。 */
+html.utools-attached[data-theme="light"],
+html.utools-attached [data-theme="light"] {
   --bg-app: #f4f4f4;
   --bg-sidebar: #f4f4f4;
   --bg-panel: #f4f4f4;
