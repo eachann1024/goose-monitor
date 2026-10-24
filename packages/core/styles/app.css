@@ -80,15 +80,25 @@ button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   -webkit-appearance: none;
   appearance: none;
   box-shadow: none;
+  border-radius: 8px !important;
   transition: background 100ms ease, box-shadow 100ms ease;
 }
-.pk-cat-tab:hover:not([data-active]) {
+[data-theme="light"] .pk-cat-tab:not([data-active]) {
+  background: #ececec !important;
+}
+.pk-cat-tab:hover:not([data-active]),
+[data-theme="light"] .pk-cat-tab:hover:not([data-active]),
+[data-theme="light"] .pk-cat-tab:focus-visible:not([data-active]) {
   background: var(--bg-row-hover) !important;
 }
-/* 激活：抬升面，避免与 #303133 主面糊在一起 */
+/* 激活：浅色用白胶囊，深色用抬升面 */
 .pk-cat-tab[data-active] {
   background: var(--bg-elev) !important;
   box-shadow: none;
+}
+[data-theme="light"] .pk-cat-tab[data-active],
+[data-theme="light"] .pk-cat-tab[data-active]:focus-visible {
+  background: #ffffff !important;
 }
 .pk-cat-tab[data-active] > span:first-child {
   color: var(--fg-1);
@@ -157,19 +167,35 @@ input::placeholder { color: var(--fg-3); opacity: 1; }
   visibility: visible;
   opacity: 1;
 }
-/* 未选中 hover：整行轻底（弱于 selected） */
+/* 表头与行组同宽内缩，圆角不贴窗口边，列仍对齐。uTools 顶栏和窗口外框不在这里。 */
+.pk-list-head,
+.pk-app-group,
+.pk-skeleton-row {
+  margin-left: 8px;
+  margin-right: 8px;
+}
+.pk-app-group {
+  margin-top: 1px;
+  margin-bottom: 1px;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.pk-skeleton-row { border-radius: 10px; }
+/* 未选中 hover：行内圆角轻底（弱于 selected） */
 .pk-process-row:hover {
   background: var(--bg-row-hover) !important;
 }
-/* 方案 A：选中组轻底 + 左线；selected:hover 同规则，hover 不得盖过 selected */
+/* 选中画在整组上，展开的子进程跟在同一个圆角里；不再用贴边左线。 */
 .pk-process-row[data-sel],
 .pk-process-row[data-sel]:hover {
-  background: var(--bg-row-sel) !important;
-  box-shadow: inset 2px 0 0 var(--accent);
+  background: transparent !important;
+  box-shadow: none !important;
 }
-/* 展开 helper 与主行同组选中底色（wrap 带 data-sel） */
+.pk-app-group[data-sel] {
+  background: var(--bg-row-sel);
+}
 .pk-app-group[data-sel] .pk-helper-row {
-  background: var(--bg-row-sel) !important;
+  background: transparent !important;
 }
 /* Helper 子进程行背景 —— 深主题轻微压暗，浅主题轻微加灰 */
 [data-theme="dark"] { --bg-helper-row: rgba(0, 0, 0, 0.12); }
@@ -240,6 +266,11 @@ input::placeholder { color: var(--fg-3); opacity: 1; }
 /* meter 宽度动画 */
 .meter-fill { transition: none; }
 
+.pk-close-hint {
+  border-radius: 10px !important;
+  border-color: var(--border-1) !important;
+  background: var(--bg-panel) !important;
+}
 .pk-close-hint:hover:not(:disabled) {
   background: var(--bg-row-hover) !important;
 }
@@ -328,7 +359,7 @@ input::placeholder { color: var(--fg-3); opacity: 1; }
   place-items: center;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: 10px;
   background: transparent;
   color: var(--fg-2);
   cursor: pointer;

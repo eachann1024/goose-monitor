@@ -1269,7 +1269,7 @@ class ProcKillApp {
     }
     ref.signature = sig;
 
-    // 选中样式由 CSS 驱动（方案 A：轻底 + 左线）；wrap 的 data-sel 让展开 helper 同组高亮。
+    // 选中样式由 CSS 驱动（内缩圆角组底）；wrap 的 data-sel 让展开 helper 同组高亮。
     if (selected) {
       ref.row.setAttribute("data-sel", "1");
       ref.wrap.setAttribute("data-sel", "1");
