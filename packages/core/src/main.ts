@@ -24,9 +24,9 @@ import {
   fmtRate,
   formatListenPorts,
   isModKey,
-  fuzzyMatchScore,
-  parsePortQuery,
   rowMatchesQuery,
+  rowSearchScore,
+  searchHighlightQuery,
   moveSelection,
   sortProcessRows,
   processSelectionKey,
@@ -293,27 +293,22 @@ class ProcKillApp {
     });
   }
 
+  private searchVisibility(): { showPid: boolean; showPorts: boolean } {
+    return {
+      showPid: this.s.showPid,
+      showPorts: portsVisibleOnPage(this.s.showPorts, this.s.cat),
+    };
+  }
+
   private searchScore(app: AppRow, query: string): number {
-    if (parsePortQuery(query) != null) return rowMatchesQuery(app, query) ? 0 : Number.POSITIVE_INFINITY;
-    const helperScore = app.helpers.reduce((best, hp) => Math.min(
-      best,
-      80 + fuzzyMatchScore(`${hp.name} ${hp.role} ${hp.pid} ${formatListenPorts(hp.ports)}`, query),
-    ), Number.POSITIVE_INFINITY);
-    return Math.min(
-      fuzzyMatchScore(app.name, query),
-      20 + fuzzyMatchScore(String(app.pid), query),
-      30 + fuzzyMatchScore(formatListenPorts(app.ports), query),
-      40 + fuzzyMatchScore(app.path, query),
-      50 + fuzzyMatchScore(app.commandLine || "", query),
-      helperScore,
-    );
+    return rowSearchScore(app, query, this.searchVisibility());
   }
 
   private get filtered(): AppRow[] {
     const q = this.s.query.trim();
     const base = this.s.list;
     if (!q) return base;
-    return base.filter((a) => rowMatchesQuery(a, q));
+    return base.filter((a) => rowMatchesQuery(a, q, this.searchVisibility()));
   }
 
   private visibleCache: AppRow[] | null = null;
@@ -1255,7 +1250,7 @@ class ProcKillApp {
     // 指纹：决定是否需要重绘这一行（含值、选中、展开、量尺基准、图标相关、helper 明细）。
     // helper 明细必须纳入：展开态下，即便父级聚合值四舍五入后不变，helper 的 pid/cpu/mem 仍可能变。
     // 图标字段纳入：真实图标异步补上或系统归属变化时要能重画。
-    const q = s.query.trim().toLowerCase();
+    const q = searchHighlightQuery(s.query.trim().toLowerCase());
     const sig = [
       a.cpu, a.mem, a.procs, a.pid, a.name, a.path, (a.ports || []).join(","),
       s.showPid ? 1 : 0, portsVisibleOnPage(s.showPorts, s.cat) ? 1 : 0,
@@ -1306,9 +1301,9 @@ class ProcKillApp {
     const lay = layoutForCat(s.cat);
     ref.nameLine.replaceChildren(highlight(a.name, q));
     const portsText = portsVisibleOnPage(s.showPorts, s.cat) ? formatListenPorts(a.ports) : "";
-    ref.portsLine.replaceChildren(document.createTextNode(portsText));
+    ref.portsLine.replaceChildren(highlight(portsText, q));
     ref.portsLine.hidden = !portsText;
-    ref.pathLine.replaceChildren(document.createTextNode(s.showPid ? String(a.pid) : ""));
+    ref.pathLine.replaceChildren(highlight(s.showPid ? String(a.pid) : "", q));
     ref.pathLine.hidden = !s.showPid;
     this.fillMetricCells(ref, a, lay.metrics);
 
@@ -1340,10 +1335,14 @@ class ProcKillApp {
     cell.appendChild(h("span", { style: { font: "var(--t-xs)", color: "var(--fg-3)", padding: "0 5px", borderRadius: "4px", background: "var(--bg-elev)", whiteSpace: "nowrap", flex: "none" }, text: hp.role }));
     const helperPorts = portsVisibleOnPage(this.s.showPorts, this.s.cat) ? formatListenPorts(hp.ports) : "";
     if (helperPorts) {
-      cell.appendChild(h("span", { className: "pk-row-ports", style: { whiteSpace: "nowrap", flex: "none" }, text: helperPorts }));
+      const ports = h("span", { className: "pk-row-ports", style: { whiteSpace: "nowrap", flex: "none" } });
+      ports.appendChild(highlight(helperPorts, q));
+      cell.appendChild(ports);
     }
     if (this.s.showPid) {
-      cell.appendChild(h("span", { className: "pk-row-pid", style: { font: "400 12px/16px var(--font-mono)", color: "var(--fg-3)", whiteSpace: "nowrap", flex: "none" }, text: String(hp.pid) }));
+      const pid = h("span", { className: "pk-row-pid", style: { font: "400 12px/16px var(--font-mono)", color: "var(--fg-3)", whiteSpace: "nowrap", flex: "none" } });
+      pid.appendChild(highlight(String(hp.pid), q));
+      cell.appendChild(pid);
     }
     hr.appendChild(cell);
     for (const m of layoutForCat(this.s.cat).metrics) {
