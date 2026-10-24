@@ -230,6 +230,14 @@ export function formatListenPorts(ports: number[] | undefined): string {
   return ports.join(" ");
 }
 
+/** 搜索是否纳入当前界面正在显示的 PID / 端口。 */
+export interface SearchVisibility {
+  showPid: boolean;
+  showPorts: boolean;
+}
+
+const DEFAULT_SEARCH_VISIBILITY: SearchVisibility = { showPid: true, showPorts: true };
+
 /** `8101` / `:8101` → 端口数字；非法或超范围返回 null。 */
 export function parsePortQuery(query: string): number | null {
   const match = query.trim().match(/^:?(\d+)$/);
@@ -239,42 +247,114 @@ export function parsePortQuery(query: string): number | null {
   return port;
 }
 
-/** 名称 + 路径 + PID + 端口 + 命令行 + helpers，供普通模糊搜索。 */
-export function searchHaystack(row: AppRow): string {
-  const helpers = (row.helpers || []).map((hp) =>
-    [hp.name, hp.role, hp.pid, formatListenPorts(hp.ports)].join(" ")
-  ).join(" ");
+/** `:8101` 去掉冒号后再高亮；其它查询原样。 */
+export function searchHighlightQuery(query: string): string {
+  const q = query.trim();
+  return /^:\d+$/.test(q) ? q.slice(1) : q;
+}
+
+function numericSearchNeedle(query: string): { needle: string; portOnly: boolean } | null {
+  const match = query.trim().match(/^(:?)(\d+)$/);
+  if (!match) return null;
+  return { needle: match[2], portOnly: match[1] === ":" };
+}
+
+function declaredServerPorts(commandLine: string | undefined): string[] {
+  if (!commandLine) return [];
+  const found: string[] = [];
+  const re = /(?:--server\.port=|-Dserver\.port=)(\d+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(commandLine))) found.push(match[1]);
+  return found;
+}
+
+/** 逐个数字匹配，避免 5173 与 24678 连写后跨端口命中。 */
+function fuzzyMatchesAny(values: Array<string | number>, needle: string): boolean {
+  return values.some((value) => String(value).length > 0 && fuzzyMatch(String(value), needle));
+}
+
+function bestFieldScore(values: Array<string | number>, query: string): number {
+  let best = Number.POSITIVE_INFINITY;
+  for (const value of values) {
+    const text = String(value);
+    if (!text) continue;
+    best = Math.min(best, fuzzyMatchScore(text, query));
+  }
+  return best;
+}
+
+function portNeedles(row: AppRow): string[] {
+  return [
+    ...(row.ports || []),
+    ...(row.helpers || []).flatMap((hp) => hp.ports || []),
+    ...declaredServerPorts(row.commandLine),
+  ].map(String);
+}
+
+function pidNeedles(row: AppRow): string[] {
+  return [row.pid, ...(row.helpers || []).map((hp) => hp.pid)].map(String);
+}
+
+/** 名称 + 路径 + 命令行；PID / 端口只在对应显示开关打开时纳入。 */
+export function searchHaystack(row: AppRow, visibility: SearchVisibility = DEFAULT_SEARCH_VISIBILITY): string {
+  const helpers = (row.helpers || []).map((hp) => [
+    hp.name,
+    hp.role,
+    visibility.showPid ? hp.pid : "",
+    visibility.showPorts ? formatListenPorts(hp.ports) : "",
+  ].join(" ")).join(" ");
   return [
     row.name,
     row.path,
-    row.pid,
-    formatListenPorts(row.ports),
+    visibility.showPid ? row.pid : "",
+    visibility.showPorts ? formatListenPorts(row.ports) : "",
     row.commandLine || "",
     helpers,
   ].join(" ");
 }
 
-function commandLineHasServerPort(commandLine: string | undefined, port: number): boolean {
-  if (!commandLine) return false;
-  const re = /(?:--server\.port=|-Dserver\.port=)(\d+)/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(commandLine))) {
-    if (Number(match[1]) === port) return true;
-  }
-  return false;
-}
-
-/** 空 query 全通过；端口查询精确命中 ports / helper.ports / 命令行声明端口；否则模糊搜索 haystack。 */
-export function rowMatchesQuery(row: AppRow, query: string): boolean {
+/** 空 query 全通过。纯数字只模糊匹配已显示的端口或 PID；`:8080` 只匹配端口。 */
+export function rowMatchesQuery(
+  row: AppRow,
+  query: string,
+  visibility: SearchVisibility = DEFAULT_SEARCH_VISIBILITY,
+): boolean {
   const q = query.trim();
   if (!q) return true;
-  const port = parsePortQuery(q);
-  if (port != null) {
-    if ((row.ports || []).includes(port)) return true;
-    if ((row.helpers || []).some((hp) => (hp.ports || []).includes(port))) return true;
-    return commandLineHasServerPort(row.commandLine, port);
+  const numeric = numericSearchNeedle(q);
+  if (numeric) {
+    if (visibility.showPorts && fuzzyMatchesAny(portNeedles(row), numeric.needle)) return true;
+    if (!numeric.portOnly && visibility.showPid && fuzzyMatchesAny(pidNeedles(row), numeric.needle)) return true;
+    return false;
   }
-  return fuzzyMatch(searchHaystack(row), q);
+  return fuzzyMatch(searchHaystack(row, visibility), q);
+}
+
+/** 越小越相关。隐藏的 PID / 端口不参与打分。 */
+export function rowSearchScore(
+  row: AppRow,
+  query: string,
+  visibility: SearchVisibility = DEFAULT_SEARCH_VISIBILITY,
+): number {
+  const q = searchHighlightQuery(query);
+  const helperScore = (row.helpers || []).reduce((best, hp) => Math.min(
+    best,
+    80 + fuzzyMatchScore([
+      hp.name,
+      hp.role,
+      visibility.showPid ? hp.pid : "",
+      visibility.showPorts ? formatListenPorts(hp.ports) : "",
+    ].join(" "), q),
+  ), Number.POSITIVE_INFINITY);
+  const scores = [
+    fuzzyMatchScore(row.name, q),
+    40 + fuzzyMatchScore(row.path, q),
+    50 + fuzzyMatchScore(row.commandLine || "", q),
+    helperScore,
+  ];
+  if (visibility.showPid) scores.push(20 + bestFieldScore(pidNeedles(row), q));
+  if (visibility.showPorts) scores.push(30 + bestFieldScore(portNeedles(row), q));
+  return Math.min(...scores);
 }
 
 export const fmtRate = (bytesPerSecond: number): string => {
