@@ -535,6 +535,31 @@ window.gooseMonitor = {
   // 非 uTools 环境（开发态）utools 不存在，直接返回，不报错
   if (typeof utools === "undefined" || !utools) return;
 
+  // main = 吸附在搜索框下的小窗；detach / browser = 独立窗口。
+  // 类名只在吸附时加上，样式据此把浅色背景改成 #f4f4f4；独立窗口保持原主题色。
+  var attachedChrome = false;
+  function readAttachedWindow() {
+    try {
+      if (typeof utools.getWindowType !== "function") return true;
+      return utools.getWindowType() === "main";
+    } catch (e) {
+      return true;
+    }
+  }
+  function paintAttachedChrome() {
+    var root = document.documentElement;
+    if (!root || !root.classList) return;
+    root.classList.toggle("utools-attached", attachedChrome);
+  }
+  function syncAttachedChrome(attached) {
+    attachedChrome = attached;
+    paintAttachedChrome();
+  }
+  syncAttachedChrome(readAttachedWindow());
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", paintAttachedChrome);
+  }
+
   // 回车 / 上下键统一由前端 main.ts 的 window 捕获监听处理（它已在捕获阶段处理
   // 宿主转发进来的 Return/Up/Down，并区分搜索框、交互控件与列表页）。
   // preload 与页面共享同一个 window，这里若再接管一次，同一事件会被处理两遍：
@@ -600,6 +625,7 @@ window.gooseMonitor = {
   // 关闭超过 5 分钟再进入时清空历史筛选，subInput 与列表都显示全部。
   if (typeof utools.onPluginEnter === "function") {
     utools.onPluginEnter((entry) => {
+      syncAttachedChrome(readAttachedWindow());
       // 必须在 setSubInput 前读取；部分宿主会在安装回调时先发送空文本。
       let savedQuery = "";
       if (typeof utools.dbStorage?.getItem === "function") {
@@ -623,6 +649,11 @@ window.gooseMonitor = {
   } else {
     // 极少数无 onPluginEnter 的环境，退化为顶层注册一次
     installSubInput();
+  }
+
+  // 分离成独立窗口后立刻去掉吸附底色，不等页面重载。
+  if (typeof utools.onPluginDetach === "function") {
+    utools.onPluginDetach(() => syncAttachedChrome(false));
   }
 
   // 插件退出：记离开时间 + 移除子输入框接管，避免残留到其它插件/主界面
