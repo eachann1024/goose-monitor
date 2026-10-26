@@ -1,0 +1,45 @@
+.pk-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  gap: var(--sp-2);
+  min-height: 32px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-md);
+  background: var(--bg-input);
+  color: var(--fg-1);
+  font: var(--t-sm);
+  cursor: pointer;
+}
+.pk-button:hover:not(:disabled), .pk-button:focus-visible { background: var(--bg-row-hover); border-color: var(--border-strong); }
+.pk-button:active:not(:disabled) { background: var(--bg-row-sel); }
+.pk-button--primary { background: var(--accent); border-color: var(--accent); color: var(--fg-on-accent); }
+.pk-button--primary:hover:not(:disabled), .pk-button--primary:focus-visible { background: var(--accent-hover); border-color: var(--accent-hover); }
+.pk-button:disabled { opacity: 0.5; cursor: default; }
+.pk-input {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--r-md);
+  background: var(--bg-input);
+  color: var(--fg-1);
+  font: var(--t-base);
+}
+.pk-input::placeholder { color: var(--fg-3); opacity: 1; }
+.pk-input:hover { border-color: var(--border-2); }
+.pk-input:focus { border-color: var(--accent); }
+textarea.pk-input { min-height: 128px; resize: vertical; }
+.pk-field { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
+.pk-field-label { font: var(--t-sm); color: var(--fg-2); }
+.pk-file-picker { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }
+.pk-file-hint { font: var(--t-sm); color: var(--fg-3); }
+.pk-file-list { display: flex; flex-direction: column; gap: var(--sp-1); }
+.pk-file-list:empty { display: none; }
+.pk-file { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-1) var(--sp-2); border-radius: var(--r-sm); background: var(--bg-elev); }
+.pk-file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: var(--t-sm); color: var(--fg-2); }
+.pk-file-remove { min-height: 24px; width: 24px; padding: 0; border-color: transparent; background: transparent; font-size: 18px; }
