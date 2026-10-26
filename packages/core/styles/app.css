@@ -1,3 +1,5 @@
+@import "./ui.css";
+
 /* ProcKill 应用外壳样式。 */
 * { box-sizing: border-box; }
 
@@ -376,8 +378,15 @@ input::placeholder { color: var(--fg-3); opacity: 1; }
   background: var(--bg-panel);
 }
 .pk-settings-page[hidden],
+.pk-feedback-page[hidden],
 .pk-list-page[hidden],
 .pk-toolbar[hidden] { display: none !important; }
+.pk-feedback-page > .pk-settings-list { overflow-y: auto; }
+.pk-feedback-form { display: flex; flex-direction: column; gap: var(--sp-5); width: 100%; max-width: 520px; margin: 0 auto; }
+.pk-feedback-fields { display: flex; flex-direction: column; gap: var(--sp-5); min-width: 0; margin: 0; padding: 0; border: 0; }
+.pk-feedback-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--sp-3); }
+.pk-feedback-status { flex: 1; min-width: 0; margin: 0; font: var(--t-sm); color: var(--fg-2); }
+.pk-feedback-status:empty { display: none; }
 .pk-settings-bar {
   height: 42px;
   flex: none;

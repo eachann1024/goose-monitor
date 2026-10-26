@@ -47,6 +47,7 @@ import {
   type ProcessSortDir,
 } from "./shared";
 import { icon } from "./icons";
+import { buildFeedbackPage, mountFeedback, type FeedbackPageRefs } from "./feedback";
 import { appIcon, kbd, h, highlight } from "./atoms";
 import {
   SHOW_PID_PREF_KEY,
@@ -87,7 +88,7 @@ interface State {
   networkUsage: Map<string, NetworkAppUsage>;
   theme: UiTheme;
   themePref: ThemePref;
-  page: "list" | "settings";
+  page: "list" | "settings" | "feedback";
   showPid: boolean;
   showPorts: boolean;
 }
@@ -150,6 +151,7 @@ class ProcKillApp {
   private listMain!: HTMLElement;
   private listToolbar!: HTMLElement;
   private settingsPage!: SettingsPageRefs;
+  private feedbackPage!: FeedbackPageRefs;
   private settingsBtn!: HTMLButtonElement;
 
   // 是否运行在 uTools 环境（用于叠加 uTools 专属视觉）
@@ -532,11 +534,12 @@ class ProcKillApp {
   }
 
   // ---------- 键盘 ----------
-  private setPage(page: "list" | "settings"): void {
+  private setPage(page: "list" | "settings" | "feedback"): void {
     if (this.s.page === page) return;
     this.s.page = page;
     this.update();
     if (page === "settings") this.settingsPage.back.focus();
+    else if (page === "feedback") this.feedbackPage.back.focus();
     else this.scroll.focus({ preventScroll: true });
   }
 
@@ -558,7 +561,7 @@ class ProcKillApp {
     window.addEventListener("keydown", (e) => {
       const mod = isModKey(e);
       const s = this.s;
-      if (s.page === "settings") {
+      if (s.page === "settings" || s.page === "feedback") {
         if (e.key === "Escape") {
           e.preventDefault();
           this.setPage("list");
@@ -661,7 +664,7 @@ class ProcKillApp {
     };
     // 宿主捕获回车 / 子输入框回车：结束当前选中，否则第一条可见行。
     w.__prockillTryKill = () => {
-      if (this.s.page === "settings") return;
+      if (this.s.page !== "list") return;
       this.tryKill(resolveKillTarget(this.selApp, this.visible));
     };
     w.__prockillMoveSel = (delta: number) => {
@@ -670,7 +673,7 @@ class ProcKillApp {
     // 少数宿主提供子输入框回车回调；不抢焦点，只结束当前/第一条。
     w.__prockillHostKey = (key: string) => {
       if (!isHostSearchListKey(key)) return;
-      if (this.s.page === "settings") return;
+      if (this.s.page !== "list") return;
       const normalized = normalizeListKey(key);
       if (normalized === "Enter") w.__prockillTryKill();
       else if (normalized === "ArrowUp") this.moveSel(-1);
@@ -679,7 +682,7 @@ class ProcKillApp {
   }
 
   private moveSel(direction: -1 | 1): void {
-    if (this.s.page === "settings") return;
+    if (this.s.page !== "list") return;
     const v = this.visible;
     const current = this.s.selectedKey
       ? v.findIndex((row) => processSelectionKey(row) === this.s.selectedKey)
@@ -708,6 +711,8 @@ class ProcKillApp {
       (key, value) => this.setDisplayPref(key, value),
     );
     this.win.appendChild(this.settingsPage.root);
+    this.feedbackPage = buildFeedbackPage(() => this.setPage("list"), () => this.toast("已收到"));
+    this.win.appendChild(this.feedbackPage.root);
 
     this.root.appendChild(this.win);
   }
@@ -786,7 +791,7 @@ class ProcKillApp {
         height: "42px", flex: "none", display: "flex", alignItems: "center", gap: "8px",
         padding: "0 10px", background: "var(--bg-sidebar)",
       },
-      children: [tabs, this.closeHint, ...(this.usesEmbeddedSearch ? [this.searchBar] : []), this.settingsBtn],
+      children: [tabs, this.closeHint, ...(this.usesEmbeddedSearch ? [this.searchBar] : []), mountFeedback(() => this.setPage("feedback")), this.settingsBtn],
     });
     return this.listToolbar;
   }
@@ -903,10 +908,12 @@ class ProcKillApp {
     this.win.setAttribute("data-show-pid", s.showPid ? "1" : "0");
     this.win.setAttribute("data-show-ports", portsVisibleOnPage(s.showPorts, s.cat) ? "1" : "0");
     const onSettings = s.page === "settings";
-    this.listToolbar.hidden = onSettings;
-    this.listMain.hidden = onSettings;
+    const onFeedback = s.page === "feedback";
+    this.listToolbar.hidden = onSettings || onFeedback;
+    this.listMain.hidden = onSettings || onFeedback;
     this.settingsPage.root.hidden = !onSettings;
-    if (onSettings) {
+    this.feedbackPage.root.hidden = !onFeedback;
+    if (onSettings || onFeedback) {
       this.settingsPage.sync({ showPid: s.showPid, showPorts: s.showPorts });
       return;
     }
