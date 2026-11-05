@@ -398,8 +398,8 @@ input::placeholder { color: var(--fg-3); opacity: 1; }
   flex: 1;
   min-height: 0;
   width: 100%;
-  max-width: 560px;
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
   display: flex;
   flex-direction: column;
   padding: var(--sp-3) var(--sp-4) var(--sp-4);
@@ -617,6 +617,9 @@ input::placeholder { color: var(--fg-3); opacity: 1; }
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+}
+.pk-feedback-actions .pk-button--primary {
+  margin-left: auto;
 }
 .pk-feedback-tool-btn {
   display: inline-flex;
