@@ -381,6 +381,7 @@ export function buildFeedbackPage(onBack: () => void, onSuccess: () => void): Fe
   const sendBtn = h("button", {
     className: "pk-button pk-button--primary",
     attrs: { type: "submit" },
+    style: { marginLeft: "auto" },
     text: "发送",
   }) as HTMLButtonElement;
 
