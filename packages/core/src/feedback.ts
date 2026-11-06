@@ -4,7 +4,7 @@ import { icon } from "./icons";
 
 export const feedbackBase = "https://feedback-api.cooool.top";
 const imageLimit = 20 * 1024 * 1024;
-const videoLimit = 200 * 1024 * 1024;
+const videoLimit = 95 * 1024 * 1024;
 
 export interface FeedbackMessage {
   id: string;
@@ -349,7 +349,7 @@ export function buildFeedbackPage(onBack: () => void, onSuccess: () => void): Fe
       type: "file",
       accept: "video/mp4,video/webm,video/quicktime",
       hidden: "",
-      "aria-label": "视频，1 个，最大 200MB",
+      "aria-label": "视频，1 个，最大 95MB",
     },
   }) as HTMLInputElement;
 
@@ -794,7 +794,7 @@ export function buildFeedbackPage(onBack: () => void, onSuccess: () => void): Fe
       return;
     }
     if (selectedVideo && selectedVideo.size > videoLimit) {
-      status.textContent = "视频不能超过 200MB";
+      status.textContent = "视频不能超过 95MB";
       return;
     }
 
