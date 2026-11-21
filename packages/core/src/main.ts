@@ -68,6 +68,55 @@ import {
   type ThemePref,
   type UiTheme,
 } from "./theme";
+import {
+  bucket,
+  durationBucket,
+  flush,
+  initTelemetry,
+  track,
+  type TelemetryStorage,
+} from "./telemetry";
+
+const SLOW_SAMPLE_MS = 500;
+const MAX_SLOW_SAMPLES_PER_SESSION = 3;
+const SEARCH_TRACK_DEBOUNCE_MS = 400;
+
+type TelemetryView = "process" | "window" | "network";
+type PermissionDeniedKind = "kill" | "window" | "network" | "process";
+
+function viewKind(cat: CategoryId): TelemetryView {
+  if (cat === "gui") return "window";
+  if (cat === "net") return "network";
+  return "process";
+}
+
+function isPermissionDenied(error: unknown): boolean {
+  const msg = error instanceof Error ? `${error.name} ${error.message}` : String(error || "");
+  return /eperm|eacces|permission|denied|not permitted|not authorized|unauthorized|privilege|tcc|拒绝访问|权限/i.test(msg);
+}
+
+function telemetryStorage(): TelemetryStorage | undefined {
+  const db = (window as {
+    utools?: {
+      dbStorage?: {
+        getItem?(k: string): unknown;
+        setItem?(k: string, v: string): void;
+        removeItem?(k: string): void;
+      };
+    };
+  }).utools?.dbStorage;
+  if (db && typeof db.getItem === "function" && typeof db.setItem === "function") {
+    return {
+      getItem: (key) => db.getItem!(key),
+      setItem: (key, value) => db.setItem!(key, value),
+      removeItem: (key) => {
+        if (typeof db.removeItem === "function") db.removeItem(key);
+        else db.setItem!(key, "");
+      },
+    };
+  }
+  return undefined;
+}
 
 type SortKey = ProcessSortKey;
 type SortDir = ProcessSortDir;
@@ -137,6 +186,14 @@ class ProcKillApp {
   private networkInFlight = false;
   private lastNetworkStart = Number.NEGATIVE_INFINITY;
   private static readonly NETWORK_CADENCE_MS = 5000;
+  private sessionStartedAt = Date.now();
+  private sessionActive = true;
+  private coldOpenTracked = false;
+  private reportedProcessCount = false;
+  private slowSampleCount = 0;
+  private searchTrackTimer: number | null = null;
+  private pendingSearchTrack = false;
+  private lastTrackedSearch: string | null = null;
 
   // ---- 持久骨架节点引用（mount 后填充，永不为 null）----
   private win!: HTMLElement;
@@ -206,6 +263,70 @@ class ProcKillApp {
       showPorts: display.showPorts,
     };
     this.refreshResolvedTheme();
+    this.installTelemetry();
+  }
+
+  private telemetryModule(): string {
+    return this.s.page === "list" ? viewKind(this.s.cat) : this.s.page;
+  }
+
+  private installTelemetry(): void {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") this.endSession();
+      else if (document.visibilityState === "visible") this.startSessionIfNeeded();
+    });
+    window.addEventListener("pagehide", () => this.endSession());
+    initTelemetry({
+      project: "monitor",
+      version: __APP_VERSION__,
+      storage: telemetryStorage(),
+      theme: () => this.s.theme,
+      osVersion: () => this.bridge.getOsVersion?.() ?? "",
+      arch: () => this.bridge.getArch?.() ?? "",
+      module: () => this.telemetryModule(),
+    });
+  }
+
+  private trackOpen(entry: "prockill" | "prockill-search"): void {
+    const props: { entry: "prockill" | "prockill-search"; cold_ms?: number } = { entry };
+    if (!this.coldOpenTracked) {
+      this.coldOpenTracked = true;
+      props.cold_ms = Math.round(performance.now());
+    }
+    track("app.open", props);
+  }
+
+  private startSessionIfNeeded(): void {
+    if (this.sessionActive) return;
+    this.sessionStartedAt = Date.now();
+    this.sessionActive = true;
+    this.slowSampleCount = 0;
+  }
+
+  private endSession(flushNow = false): void {
+    this.flushSearchTrack();
+    if (!this.sessionActive) return;
+    this.sessionActive = false;
+    track("app.session", { dur: durationBucket(Date.now() - this.sessionStartedAt) });
+    if (flushNow) void flush(true);
+  }
+
+  private flushSearchTrack(): void {
+    if (this.searchTrackTimer !== null) {
+      clearTimeout(this.searchTrackTimer);
+      this.searchTrackTimer = null;
+    }
+    if (!this.pendingSearchTrack) return;
+    const trimmed = this.s.query.trim();
+    if (!trimmed) {
+      this.pendingSearchTrack = false;
+      return;
+    }
+    if (this.s.loading && this.s.list.length === 0) return;
+    this.pendingSearchTrack = false;
+    if (trimmed === this.lastTrackedSearch) return;
+    this.lastTrackedSearch = trimmed;
+    track("search", { hit: this.visible.length > 0 });
   }
 
   private refreshResolvedTheme(): void {
@@ -335,6 +456,7 @@ class ProcKillApp {
       this.networkInFlight = true;
       this.lastNetworkStart = performance.now();
     }
+    const sampleStart = performance.now();
     try {
       let list: AppRow[];
       if (cat === "gui") {
@@ -355,14 +477,28 @@ class ProcKillApp {
       }
       // 期间又发起了新请求 / 分类已切走 → 丢弃这份过期结果，避免串台。
       if (seq !== this.loadSeq || cat !== this.s.cat) return;
+      const sampleMs = Math.round(performance.now() - sampleStart);
+      if (sampleMs > SLOW_SAMPLE_MS && this.slowSampleCount < MAX_SLOW_SAMPLES_PER_SESSION) {
+        this.slowSampleCount += 1;
+        track("sample.slow", { sample_ms: sampleMs });
+      }
+      if (!this.reportedProcessCount) {
+        this.reportedProcessCount = true;
+        track("process.count", { range: bucket(list.length) });
+      }
       this.rememberSelectionIndex();
       this.s.list = this.maskKilled(list);
       this.s.loading = false;
       this.s.loadError = null;
       this.update();
+      this.flushSearchTrack();
     } catch (e) {
       if (seq !== this.loadSeq || cat !== this.s.cat) return;
       console.error("[ProcKill] load failed", e);
+      if (isPermissionDenied(e)) {
+        const kind: PermissionDeniedKind = cat === "gui" ? "window" : cat === "net" ? "network" : "process";
+        track("permission.denied", { kind });
+      }
       this.s.loading = false;
       const message = cat === "net" ? "网络采样失败，已保留上次结果" :
         cat === "gui" ? "可见窗口刷新失败，已保留上次结果" :
@@ -389,11 +525,13 @@ class ProcKillApp {
   // ---------- 进程动作 ----------
   private async doKill(app: AppRow): Promise<void> {
     if (this.killingId) return;
+    this.flushSearchTrack();
     this.rememberSelectionIndex();
     this.killingId = app.id;
     this.update();
     try {
       const res = await this.bridge.killProcess(app);
+      track("process.kill", { ok: res.ok, force: true });
       if (res.ok) {
         // ① 让所有在途 load/polling 响应失效（它们仍含被 kill 的进程，回来会整包写回使其复活）
         ++this.loadSeq;
@@ -402,10 +540,13 @@ class ProcKillApp {
         this.s.list = this.s.list.filter((a) => a.id !== app.id);
         if (this.s.selectedKey === processSelectionKey(app)) this.setSelectedKey(null);
       } else {
+        if (isPermissionDenied(res.error)) track("permission.denied", { kind: "kill" });
         this.toast(`结束失败：${res.error || "权限不足或进程已退出"}`);
       }
     } catch (error) {
       console.error("[ProcKill] kill failed", error);
+      track("process.kill", { ok: false, force: true });
+      if (isPermissionDenied(error)) track("permission.denied", { kind: "kill" });
       this.toast("结束失败：无法连接进程服务，请刷新后重试");
     } finally {
       this.killingId = null;
@@ -481,11 +622,24 @@ class ProcKillApp {
     this.setSelectedKey(null);
     this.s.query = restoreQuery(query);
     this.bridge.setPref(QUERY_PREF_KEY, this.s.query);
+    if (this.searchTrackTimer !== null) {
+      clearTimeout(this.searchTrackTimer);
+      this.searchTrackTimer = null;
+    }
+    const trimmed = this.s.query.trim();
+    if (!trimmed) {
+      this.pendingSearchTrack = false;
+      this.lastTrackedSearch = null;
+      return;
+    }
+    this.pendingSearchTrack = true;
+    this.searchTrackTimer = window.setTimeout(() => this.flushSearchTrack(), SEARCH_TRACK_DEBOUNCE_MS);
   }
 
   private setCat(cat: CategoryId): void {
     if (cat === this.s.cat || !this.categories.some((category) => category.id === cat)) return;
     this.s.cat = cat;
+    track("view.switch", { to: viewKind(cat) });
     this.applySortForCategory(cat);
     this.bridge.setPref(CATEGORY_PREF_KEY, cat);
     this.refreshGridLayout();
@@ -536,6 +690,7 @@ class ProcKillApp {
   // ---------- 键盘 ----------
   private setPage(page: "list" | "settings" | "feedback"): void {
     if (this.s.page === page) return;
+    if (this.s.page === "settings") this.settingsPage.closePreview();
     this.s.page = page;
     this.update();
     if (page === "settings") this.settingsPage.back.focus();
@@ -564,6 +719,7 @@ class ProcKillApp {
       if (s.page === "settings" || s.page === "feedback") {
         if (e.key === "Escape") {
           e.preventDefault();
+          if (s.page === "settings" && this.settingsPage.closePreview()) return;
           this.setPage("list");
         }
         return;
@@ -650,10 +806,15 @@ class ProcKillApp {
   private installUtoolsHooks(): void {
     const w = window as any;
     // 进入插件：先按 uTools 当前主题校准（auto 模式），再带词进入。
-    w.__prockillEnter = (keyword: string) => {
+    w.__prockillEnter = (keyword: string, entryCode?: string) => {
+      this.startSessionIfNeeded();
       this.syncAutoTheme();
       this.blurPluginChrome();
+      this.trackOpen(entryCode === "prockill-search" ? "prockill-search" : "prockill");
       this.setSearch(typeof keyword === "string" ? keyword : "", true);
+    };
+    w.__prockillOut = () => {
+      this.endSession(true);
     };
     // uTools 顶部子输入框实时驱动过滤（text 可能为空 → 清空过滤）。
     w.__prockillSubInput = (text: string) => {
@@ -1365,10 +1526,19 @@ class ProcKillApp {
   }
 
   async start(): Promise<void> {
+    if (this.bridge.name !== "utools" || typeof (window as { utools?: { onPluginEnter?: unknown } }).utools?.onPluginEnter !== "function") {
+      this.trackOpen("prockill");
+    }
     const [gui, network] = await Promise.all([
       this.bridge.getGuiCapability(),
       this.bridge.getNetworkCapability(),
     ]);
+    if (gui.status === "unavailable" && isPermissionDenied(gui.error)) {
+      track("permission.denied", { kind: "window" });
+    }
+    if (network.status === "unavailable" && isPermissionDenied(network.error)) {
+      track("permission.denied", { kind: "network" });
+    }
     this.categories = visibleCategories(gui.status === "supported", network.status === "supported");
     this.s.cat = restoreCategory(this.savedCategory, this.categories);
     if (this.s.cat !== this.savedCategory) this.bridge.setPref(CATEGORY_PREF_KEY, "all");

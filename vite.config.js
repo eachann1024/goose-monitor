@@ -1,7 +1,9 @@
 import { defineConfig } from "vite";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const coreRoot = resolve(__dirname, "packages/core");
+const pkgVersion = JSON.parse(readFileSync(resolve(__dirname, "package.json"), "utf8")).version;
 
 // GOOSE_DEBUG=1 时进入可调试构建：保留未压缩源码 + sourcemap，
 // 方便在 uTools 开发者工具和浏览器 mock 里看到 packages/core/src/ 原始路径。
@@ -24,6 +26,9 @@ function stripExternalFonts() {
 
 export default defineConfig(({ mode }) => ({
   root: coreRoot,
+  define: {
+    __APP_VERSION__: JSON.stringify(pkgVersion),
+  },
   // uTools 插件用 file:// 加载，必须相对路径。
   base: mode === "utools" ? "./" : "/",
   plugins: mode === "utools" ? [stripExternalFonts()] : [],

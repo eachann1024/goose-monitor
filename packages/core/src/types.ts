@@ -111,4 +111,7 @@ export interface PlatformBridge {
   /** 持久化界面偏好。 */
   getPref(key: string): string | null;
   setPref(key: string, value: string): void;
+  /** 可选系统版本主版本与 CPU 架构（仅 Node preload 可获取）。 */
+  getOsVersion?(): string;
+  getArch?(): string;
 }

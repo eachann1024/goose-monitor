@@ -10,12 +10,14 @@ declare global {
       listProcesses(category: string): Promise<AppRow[]>;
       killProcess(id: string, snapshotToken: string, pids: number[]): Promise<KillResult>;
       getRuntimePlatform(): RuntimePlatform;
+      getOsVersion?: () => string;
+      getArch?: () => string;
       getGuiCapability(): Promise<Capability>;
       getGuiSnapshot(): Promise<GuiSnapshot>;
       getNetworkCapability(): Promise<Capability>;
       getNetworkSnapshot(): Promise<NetworkSnapshot>;
     };
-    utools?: { isDarkColors?: () => boolean; dbStorage?: { getItem(k: string): unknown; setItem(k: string, v: string): void } };
+    utools?: { isDarkColors?: () => boolean; dbStorage?: { getItem(k: string): unknown; setItem(k: string, v: string): void; removeItem?(k: string): void } };
   }
 }
 
@@ -50,4 +52,6 @@ export class UtoolsBridge implements PlatformBridge {
     if (u?.dbStorage) { u.dbStorage.setItem(key, value); return; }
     try { localStorage.setItem(key, value); } catch { /* ignore */ }
   }
+  getOsVersion(): string { return window.gooseMonitor?.getOsVersion?.() ?? ""; }
+  getArch(): string { return window.gooseMonitor?.getArch?.() ?? ""; }
 }

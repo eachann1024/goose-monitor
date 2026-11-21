@@ -1,6 +1,13 @@
 /* 设置页：独立整页、竖排开关。偏好读写走 bridge pref。 */
 import { h } from "./atoms";
 import { icon } from "./icons";
+import { button } from "./ui";
+import {
+  isTelemetryEnabled,
+  setTelemetryEnabled,
+  subscribeTelemetry,
+  telemetryPreview,
+} from "./telemetry";
 
 export const SHOW_PID_PREF_KEY = "pk_show_pid";
 export const SHOW_PORTS_PREF_KEY = "pk_show_ports";
@@ -77,7 +84,52 @@ export interface SettingsPageRefs {
   back: HTMLButtonElement;
   pidSwitch: HTMLButtonElement;
   portsSwitch: HTMLButtonElement;
+  telemetrySwitch: HTMLButtonElement;
   sync(prefs: DisplayPrefs): void;
+  closePreview(): boolean;
+}
+
+function buildTelemetryPreviewModal(onClose: () => void): {
+  backdrop: HTMLElement;
+  closeBtn: HTMLButtonElement;
+  refresh: () => void;
+} {
+  const titleId = "pk-telemetry-preview-title";
+  const pre = h("pre", {
+    className: "pk-telemetry-pre selectable",
+    attrs: { "aria-readonly": "true", tabindex: "0" },
+  });
+  const closeBtn = h("button", {
+    className: "pk-modal-close",
+    attrs: { type: "button", "aria-label": "关闭预览" },
+    on: { click: onClose },
+    children: [icon("x", 15)],
+  }) as HTMLButtonElement;
+  const card = h("div", {
+    className: "pk-modal-card",
+    attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": titleId },
+    on: { click: (e: MouseEvent) => e.stopPropagation() },
+    children: [
+      h("div", {
+        className: "pk-modal-head",
+        children: [
+          h("h2", { className: "pk-modal-title", attrs: { id: titleId }, text: "上报内容预览" }),
+          closeBtn,
+        ],
+      }),
+      pre,
+    ],
+  });
+  const backdrop = h("div", {
+    className: "pk-modal-backdrop",
+    attrs: { hidden: "" },
+    on: { click: onClose },
+    children: [card],
+  });
+  const refresh = () => {
+    pre.textContent = JSON.stringify(telemetryPreview(), null, 2);
+  };
+  return { backdrop, closeBtn, refresh };
 }
 
 export function buildSettingsPage(
@@ -97,10 +149,39 @@ export function buildSettingsPage(
     prefs.showPorts,
     () => onChange("showPorts", ports.sw.getAttribute("aria-checked") !== "true"),
   );
+  const telemetry = settingRow(
+    "发送匿名使用统计",
+    "只统计功能使用次数和报错类型，不含进程名、路径、窗口标题或网络地址，关闭后会删除匿名编号。",
+    isTelemetryEnabled(),
+    () => setTelemetryEnabled(telemetry.sw.getAttribute("aria-checked") !== "true"),
+  );
+
+  let previewBtn!: HTMLButtonElement;
+  const closePreview = (): boolean => {
+    if (modal.backdrop.hidden) return false;
+    modal.backdrop.hidden = true;
+    previewBtn.focus();
+    return true;
+  };
+  const modal = buildTelemetryPreviewModal(() => { closePreview(); });
+  previewBtn = button("查看上报内容", {
+    onClick: () => {
+      modal.refresh();
+      modal.backdrop.hidden = false;
+      modal.closeBtn.focus();
+    },
+  });
+
+  const syncTelemetry = () => {
+    telemetry.sw.setAttribute("aria-checked", isTelemetryEnabled() ? "true" : "false");
+    if (!modal.backdrop.hidden) modal.refresh();
+  };
+  subscribeTelemetry(syncTelemetry);
+
   const back = h("button", {
     className: "pk-settings-back",
     attrs: { type: "button", "aria-label": "返回进程列表" },
-    on: { click: onBack },
+    on: { click: () => { closePreview(); onBack(); } },
     children: [icon("chevron-left", 16, { color: "var(--fg-2)" } as any), document.createTextNode("返回")],
   }) as HTMLButtonElement;
   const header = h("header", {
@@ -110,28 +191,43 @@ export function buildSettingsPage(
       h("h1", { className: "pk-settings-heading", text: "设置" }),
     ],
   });
-  const list = h("div", {
-    className: "pk-settings-list",
+  const displayGroup = h("div", {
+    className: "pk-settings-group",
     attrs: { role: "group", "aria-label": "显示" },
     children: [
       h("div", { className: "pk-settings-label", text: "显示" }),
-      pid.row,
-      ports.row,
+      h("div", { className: "pk-settings-rows", children: [pid.row, ports.row] }),
     ],
+  });
+  const privacyGroup = h("div", {
+    className: "pk-settings-group",
+    attrs: { role: "group", "aria-label": "隐私与统计" },
+    children: [
+      h("div", { className: "pk-settings-label", text: "隐私与统计" }),
+      h("div", { className: "pk-settings-rows", children: [telemetry.row] }),
+      h("div", { className: "pk-settings-actions", children: [previewBtn] }),
+    ],
+  });
+  const list = h("div", {
+    className: "pk-settings-list",
+    children: [displayGroup, privacyGroup],
   });
   const root = h("section", {
     className: "pk-settings-page",
     attrs: { hidden: "", "aria-label": "设置" },
-    children: [header, list],
+    children: [header, list, modal.backdrop],
   });
   return {
     root,
     back,
     pidSwitch: pid.sw,
     portsSwitch: ports.sw,
+    telemetrySwitch: telemetry.sw,
     sync(next) {
       pid.sw.setAttribute("aria-checked", next.showPid ? "true" : "false");
       ports.sw.setAttribute("aria-checked", next.showPorts ? "true" : "false");
+      syncTelemetry();
     },
+    closePreview,
   };
 }

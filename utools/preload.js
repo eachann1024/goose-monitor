@@ -512,6 +512,8 @@ async function killProcess(id, snapshotToken, pids) {
 
 window.gooseMonitor = {
   getRuntimePlatform: () => IS_MAC ? "mac" : IS_WIN ? "win" : "linux",
+  getOsVersion: () => String(os.release()).split(".")[0],
+  getArch: () => process.arch,
   getGuiCapability,
   getGuiSnapshot,
   getNetworkCapability,
@@ -570,12 +572,19 @@ window.gooseMonitor = {
   // 让旧关键词在新关键词之后触发、反写出错误状态。
   var enterTimer = null;
   var pendingKeyword = "";
-  function pushEnterKeyword(keyword) {
+  var pendingEntryCode = "prockill";
+  function resolveEntryCode(entry) {
+    if (entry && entry.code === "prockill-search") return "prockill-search";
+    if (entry && (entry.type === "regex" || entry.type === "over")) return "prockill-search";
+    return "prockill";
+  }
+  function pushEnterKeyword(keyword, entryCode) {
     pendingKeyword = keyword;
+    pendingEntryCode = entryCode || "prockill";
     // 钩子已就绪（多数情况：插件已打开后再次带词进入）→ 立即同步调用，无 100ms 延迟
     if (typeof window.__prockillEnter === "function") {
       if (enterTimer !== null) { clearInterval(enterTimer); enterTimer = null; }
-      try { window.__prockillEnter(pendingKeyword); } catch (e) { console.error("[ProcKill] __prockillEnter 调用失败", e); }
+      try { window.__prockillEnter(pendingKeyword, pendingEntryCode); } catch (e) { console.error("[ProcKill] __prockillEnter 调用失败", e); }
       return;
     }
     if (enterTimer !== null) return; // 已有 timer 在跑，它会消费最新的 pendingKeyword
@@ -583,7 +592,7 @@ window.gooseMonitor = {
     enterTimer = setInterval(() => {
       tries += 1;
       if (typeof window.__prockillEnter === "function") {
-        try { window.__prockillEnter(pendingKeyword); } catch (e) { console.error("[ProcKill] __prockillEnter 调用失败", e); }
+        try { window.__prockillEnter(pendingKeyword, pendingEntryCode); } catch (e) { console.error("[ProcKill] __prockillEnter 调用失败", e); }
         clearInterval(enterTimer); enterTimer = null;
       } else if (tries >= 30) {
         clearInterval(enterTimer); enterTimer = null;
@@ -640,7 +649,7 @@ window.gooseMonitor = {
       // 每次进入都重新接管子输入框（uTools 退出/再进会清掉上次的 subInput）
       installSubInput();
       const keyword = resolveEntryQuery(entry, savedQuery);
-      pushEnterKeyword(keyword);
+      pushEnterKeyword(keyword, resolveEntryCode(entry));
       // 进入时把显式关键词或历史筛选同步回宿主输入框。
       if (typeof utools.setSubInputValue === "function") {
         try { utools.setSubInputValue(keyword); } catch (e) { /* 子输入框可能尚未就绪，忽略 */ }
@@ -659,6 +668,9 @@ window.gooseMonitor = {
   // 插件退出：记离开时间 + 移除子输入框接管，避免残留到其它插件/主界面
   if (typeof utools.onPluginOut === "function") {
     utools.onPluginOut(() => {
+      if (typeof window.__prockillOut === "function") {
+        try { window.__prockillOut(); } catch (e) { console.error("[ProcKill] __prockillOut 调用失败", e); }
+      }
       if (typeof utools.dbStorage?.setItem === "function") {
         try { utools.dbStorage.setItem(QUERY_LEFT_AT_PREF_KEY, String(Date.now())); } catch (e) { /* 忽略 */ }
       }
