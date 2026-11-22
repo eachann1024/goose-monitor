@@ -39,6 +39,7 @@ function shAsync(cmd, args, maxBuffer) {
   return execFileAsync(cmd, args, {
     encoding: "utf8",
     maxBuffer: maxBuffer || 32 * 1024 * 1024,
+    timeout: 15000,
     env: UNIX_ENV,
   }).then((r) => r.stdout);
 }
@@ -559,7 +560,7 @@ window.gooseMonitor = {
   }
   syncAttachedChrome(readAttachedWindow());
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", paintAttachedChrome);
+    document.addEventListener("DOMContentLoaded", paintAttachedChrome, { once: true });
   }
 
   // 回车 / 上下键统一由前端 main.ts 的 window 捕获监听处理（它已在捕获阶段处理
@@ -634,6 +635,7 @@ window.gooseMonitor = {
   // 关闭超过 5 分钟再进入时清空历史筛选，subInput 与列表都显示全部。
   if (typeof utools.onPluginEnter === "function") {
     utools.onPluginEnter((entry) => {
+      window.__prockillHostInactive = false;
       syncAttachedChrome(readAttachedWindow());
       // 必须在 setSubInput 前读取；部分宿主会在安装回调时先发送空文本。
       let savedQuery = "";
@@ -668,6 +670,12 @@ window.gooseMonitor = {
   // 插件退出：记离开时间 + 移除子输入框接管，避免残留到其它插件/主界面
   if (typeof utools.onPluginOut === "function") {
     utools.onPluginOut(() => {
+      window.__prockillHostInactive = true;
+      if (enterTimer !== null) {
+        clearInterval(enterTimer);
+        enterTimer = null;
+        pendingKeyword = "";
+      }
       if (typeof window.__prockillOut === "function") {
         try { window.__prockillOut(); } catch (e) { console.error("[ProcKill] __prockillOut 调用失败", e); }
       }

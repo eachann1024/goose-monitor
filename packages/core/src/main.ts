@@ -170,12 +170,13 @@ class ProcKillApp {
   private root: HTMLElement;
   private s: State;
   private refreshTimer: number | null = null;
+  private refreshInFlight = false;
+  private pageSuspended = false;
+  private toastTimer: number | null = null;
   // 仅在用户主动改变选中项（键盘上下导航）时置 true，updateList 据此把选中项滚入视野一次。
   // 轮询刷新不置位 → 不会在用户下滑时把列表强行拉回顶部。
   private pendingScrollDirection: -1 | 1 | null = null;
   private selectionFallbackIndex = 0;
-  // 请求序号：每次发起 load/polling 自增并捕获当时的分类，返回时校验仍是最新请求且分类未变，
-  // 否则丢弃——防止快速切分类时较慢的旧请求乱序返回，把旧分类数据写进当前分类标题下。
   private loadSeq = 0;
   // 刚 kill 掉的进程组 id → 遮罩到期时间（performance.now ms）。
   // 防两类“复活”：① kill 时已在途的 list 响应整包写回；② 真实后端进程退出有延迟，
@@ -183,8 +184,6 @@ class ProcKillApp {
   private recentlyKilled = new Map<string, number>();
   private static readonly KILL_MASK_MS = 4000;
   private killingId: string | null = null;
-  private networkInFlight = false;
-  private lastNetworkStart = Number.NEGATIVE_INFINITY;
   private static readonly NETWORK_CADENCE_MS = 5000;
   private sessionStartedAt = Date.now();
   private sessionActive = true;
@@ -448,17 +447,59 @@ class ProcKillApp {
   }
 
   // ---------- 数据加载 ----------
-  async load(initial = false): Promise<void> {
-    if (this.s.cat === "net" && this.networkInFlight) return;
-    const seq = ++this.loadSeq;
-    const cat = this.s.cat;
-    if (cat === "net") {
-      this.networkInFlight = true;
-      this.lastNetworkStart = performance.now();
+  private get canRefresh(): boolean {
+    return this.s.page === "list" && !document.hidden && !this.pageSuspended &&
+      !(this.isUtools && (window as Window & { __prockillHostInactive?: boolean }).__prockillHostInactive);
+  }
+
+  private stopPolling(): void {
+    ++this.loadSeq;
+    if (this.refreshTimer !== null) {
+      window.clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
     }
+  }
+
+  private requestRefresh(): void {
+    this.stopPolling();
+    if (this.canRefresh && !this.refreshInFlight) void this.load();
+  }
+
+  private installPollingLifecycle(): void {
+    document.addEventListener("visibilitychange", () => this.requestRefresh());
+    window.addEventListener("pagehide", () => {
+      this.pageSuspended = true;
+      this.stopPolling();
+    });
+    window.addEventListener("pageshow", () => {
+      if (!this.pageSuspended) return;
+      this.pageSuspended = false;
+      this.requestRefresh();
+    });
+  }
+
+  private scheduleRefresh(delay: number): void {
+    if (!this.canRefresh) return;
+    this.refreshTimer = window.setTimeout(() => {
+      this.refreshTimer = null;
+      if (this.canRefresh) void this.load();
+    }, delay);
+  }
+
+  // 同一时刻只采集一次；切换分类或隐藏窗口后丢弃旧结果。
+  private async load(): Promise<void> {
+    if (this.killingId) {
+      this.scheduleRefresh(REFRESH_MS);
+      return;
+    }
+    this.refreshInFlight = true;
+    const seq = this.loadSeq;
+    const cat = this.s.cat;
     const sampleStart = performance.now();
+    const cadence = cat === "net" ? ProcKillApp.NETWORK_CADENCE_MS : REFRESH_MS;
     try {
       let list: AppRow[];
+      let networkApps: NetworkAppUsage[] | undefined;
       if (cat === "gui") {
         const [all, snapshot] = await Promise.all([
           this.bridge.listProcesses("all"),
@@ -470,8 +511,8 @@ class ProcKillApp {
       } else if (cat === "net") {
         const snapshot = await this.bridge.getNetworkSnapshot();
         if (snapshot.status !== "supported") throw new Error(snapshot.error || "网络采样失败");
-        this.s.networkUsage = new Map(snapshot.apps.map((item) => [processSelectionKey(item.app), item]));
-        list = snapshot.apps.map((item) => item.app);
+        networkApps = snapshot.apps;
+        list = networkApps.map((item) => item.app);
       } else {
         list = await this.bridge.listProcesses(cat);
       }
@@ -487,6 +528,7 @@ class ProcKillApp {
         track("process.count", { range: bucket(list.length) });
       }
       this.rememberSelectionIndex();
+      if (networkApps) this.s.networkUsage = new Map(networkApps.map((item) => [processSelectionKey(item.app), item]));
       this.s.list = this.maskKilled(list);
       this.s.loading = false;
       this.s.loadError = null;
@@ -507,19 +549,10 @@ class ProcKillApp {
       if (this.s.list.length) this.toast(message);
       this.update();
     } finally {
-      if (cat === "net") this.networkInFlight = false;
-      if (initial) this.startPolling();
+      this.refreshInFlight = false;
+      const delay = seq === this.loadSeq ? Math.max(REFRESH_MS, cadence - (performance.now() - sampleStart)) : 0;
+      this.scheduleRefresh(delay);
     }
-  }
-
-  private startPolling(): void {
-    if (this.refreshTimer != null) return;
-    this.refreshTimer = window.setInterval(() => {
-      if (document.hidden) return;      // 窗口隐藏/最小化时不刷新
-      if (this.killingId) return;       // kill 进行中，跳过轮询避免阻塞放大
-      if (this.s.cat === "net" && performance.now() - this.lastNetworkStart < ProcKillApp.NETWORK_CADENCE_MS) return;
-      void this.load();
-    }, REFRESH_MS);
   }
 
   // ---------- 进程动作 ----------
@@ -650,9 +683,10 @@ class ProcKillApp {
     // 立刻清掉旧分类数据，否则 update() 会用旧 list 渲染、在新标题下短暂闪现旧分类行；
     // 若随后 load() 失败，旧数据还会永久残留。清空后进入加载态，新数据到了再 diff 填充。
     this.s.list = [];
+    this.s.networkUsage.clear();
     this.clearAllRows();
     this.update();
-    this.load();
+    this.requestRefresh();
   }
 
   private cycleCategory(direction: 1 | -1): void {
@@ -684,7 +718,11 @@ class ProcKillApp {
     }
     t.textContent = msg;
     t.style.opacity = "1";
-    window.setTimeout(() => { if (t) t.style.opacity = "0"; }, 2600);
+    if (this.toastTimer !== null) window.clearTimeout(this.toastTimer);
+    this.toastTimer = window.setTimeout(() => {
+      this.toastTimer = null;
+      t.style.opacity = "0";
+    }, 2600);
   }
 
   // ---------- 键盘 ----------
@@ -693,6 +731,7 @@ class ProcKillApp {
     if (this.s.page === "settings") this.settingsPage.closePreview();
     this.s.page = page;
     this.update();
+    this.requestRefresh();
     if (page === "settings") this.settingsPage.back.focus();
     else if (page === "feedback") this.feedbackPage.back.focus();
     else this.scroll.focus({ preventScroll: true });
@@ -789,7 +828,7 @@ class ProcKillApp {
         this.tryKill(resolveKillTarget(this.selApp, v));
       } else if (e.key === "r" && mod) {
         e.preventDefault();
-        this.load();
+        if (!this.refreshInFlight) this.requestRefresh();
       } else if (e.key === "Escape") {
         if (s.query || document.activeElement === this.searchInput) {
           this.setQuery(""); this.searchInput?.blur();
@@ -812,8 +851,10 @@ class ProcKillApp {
       this.blurPluginChrome();
       this.trackOpen(entryCode === "prockill-search" ? "prockill-search" : "prockill");
       this.setSearch(typeof keyword === "string" ? keyword : "", true);
+      this.requestRefresh();
     };
     w.__prockillOut = () => {
+      this.stopPolling();
       this.endSession(true);
     };
     // uTools 顶部子输入框实时驱动过滤（text 可能为空 → 清空过滤）。
@@ -1551,8 +1592,9 @@ class ProcKillApp {
     this.installKeys();
     this.installUtoolsHooks();
     this.installThemeWatch();
+    this.installPollingLifecycle();
     this.update();
-    this.load(true);
+    this.requestRefresh();
   }
 }
 
