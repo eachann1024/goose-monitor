@@ -383,6 +383,7 @@ class ProcKillApp {
 
   private applySortForCategory(cat: CategoryId): void {
     const prefs = this.readSortPrefs(cat);
+    this.invalidateVisible();
     const next = restoreSort(prefs.key, prefs.dir, cat);
     this.s.sortKey = next.key;
     this.s.sortDir = next.dir;
@@ -405,39 +406,21 @@ class ProcKillApp {
           return (sortDir === "asc" ? 1 : -1) * (value(a) - value(b));
         })
       : sortProcessRows(list, sortKey, sortDir);
-    return sorted.sort((a, b) => {
-      const q = this.s.query.trim();
-      if (q) {
-        const bySearch = this.searchScore(a, q) - this.searchScore(b, q);
-        if (bySearch !== 0) return bySearch;
-      }
-      return 0;
-    });
-  }
-
-  private searchVisibility(): { showPid: boolean; showPorts: boolean } {
-    return {
-      showPid: this.s.showPid,
-      showPorts: portsVisibleOnPage(this.s.showPorts, this.s.cat),
-    };
-  }
-
-  private searchScore(app: AppRow, query: string): number {
-    return rowSearchScore(app, query, this.searchVisibility());
-  }
-
-  private get filtered(): AppRow[] {
-    const q = this.s.query.trim();
-    const base = this.s.list;
-    if (!q) return base;
-    return base.filter((a) => rowMatchesQuery(a, q, this.searchVisibility()));
+    return sorted;
   }
 
   private visibleCache: AppRow[] | null = null;
   private get visible(): AppRow[] {
     if (this.visibleCache) return this.visibleCache;
-    this.visibleCache = this.sortList(this.filtered);
-    return this.visibleCache;
+    const { list, query, showPid, showPorts, cat } = this.s;
+    const q = query.trim();
+    if (!q) return this.visibleCache = this.sortList(list);
+
+    const visibility = { showPid, showPorts: portsVisibleOnPage(showPorts, cat) };
+    const matches = list.filter((row) => rowMatchesQuery(row, q, visibility));
+    const ranked = this.sortList(matches).map((row) => ({ row, score: rowSearchScore(row, q, visibility) }));
+    ranked.sort((a, b) => a.score - b.score);
+    return this.visibleCache = ranked.map(({ row }) => row);
   }
   private invalidateVisible(): void { this.visibleCache = null; }
 
@@ -554,6 +537,7 @@ class ProcKillApp {
       this.scheduleRefresh(delay);
     }
   }
+      this.invalidateVisible();
 
   // ---------- 进程动作 ----------
   private async doKill(app: AppRow): Promise<void> {
@@ -595,6 +579,8 @@ class ProcKillApp {
       if (now >= until) this.recentlyKilled.delete(id);
     }
     if (this.recentlyKilled.size === 0) return list;
+        this.s.expanded.delete(app.id);
+        this.invalidateVisible();
     return list.filter((a) => !this.recentlyKilled.has(a.id));
   }
 
@@ -678,6 +664,7 @@ class ProcKillApp {
     this.refreshGridLayout();
     this.setSelectedKey(null);
     this.selectionFallbackIndex = 0;
+    this.invalidateVisible();
     this.s.loading = true;
     this.s.loadError = null;
     // 立刻清掉旧分类数据，否则 update() 会用旧 list 渲染、在新标题下短暂闪现旧分类行；
@@ -707,6 +694,7 @@ class ProcKillApp {
   private toast(msg: string): void {
     let t = document.getElementById("pk-toast");
     if (!t) {
+    this.invalidateVisible();
       t = h("div", { attrs: { id: "pk-toast" }, style: {
         position: "absolute", bottom: "52px", left: "50%", transform: "translateX(-50%)",
         background: "var(--bg-elev)", border: "1px solid var(--border-2)",
@@ -763,6 +751,7 @@ class ProcKillApp {
         }
         return;
       }
+    this.invalidateVisible();
       // Tab / Shift+Tab：循环切换可见分组（全局接管，含搜索框与分类按钮焦点）。
       if (e.key === "Tab") {
         e.preventDefault();
@@ -1102,8 +1091,6 @@ class ProcKillApp {
   //  增量更新（每帧调用，只改变化的部分）
   // ============================================================
   update(): void {
-    this.invalidateVisible();
-    const v = this.visible;
     const s = this.s;
     this.win.setAttribute("data-category", s.cat);
     this.win.setAttribute("data-page", s.page);
@@ -1125,13 +1112,13 @@ class ProcKillApp {
       if (restored) this.selectionFallbackIndex = Math.max(0, v.findIndex((row) => processSelectionKey(row) === restored));
     }
 
-    this.updateHeader(v);
+    this.updateHeader();
     this.updateTabs();
     this.updateSearchBar();
     this.updateList(v);
   }
 
-  private updateHeader(v: AppRow[]): void {
+  private updateHeader(): void {
     const s = this.s;
     this.closeHint.disabled = !this.selApp || !!this.killingId;
     this.closeHint.style.opacity = this.closeHint.disabled ? "0.45" : "1";
@@ -1143,6 +1130,7 @@ class ProcKillApp {
       const key = el.getAttribute("data-key") as SortKey;
       const active = s.sortKey === key;
       el.style.color = active ? "var(--fg-1)" : "var(--fg-3)";
+    const v = this.visible;
       el.setAttribute("aria-sort", active ? (s.sortDir === "asc" ? "ascending" : "descending") : "none");
       el.setAttribute("aria-label", `按${el.textContent?.trim() || "指标"}排序，当前${active ? (s.sortDir === "asc" ? "升序" : "降序") : "未排序"}`);
       const arrow = (el as HTMLElement & { __arrow?: HTMLElement }).__arrow;
