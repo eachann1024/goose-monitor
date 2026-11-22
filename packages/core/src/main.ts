@@ -150,14 +150,38 @@ interface RowRefs {
   nameLine: HTMLElement;  // 名称行
   pathLine: HTMLElement;  // hover 才显示的 PID
   portsLine: HTMLElement; // 服务端口
-  procWrap: HTMLElement;  // 进程数单元
+  procVal: HTMLElement; // 进程数或路径
   cpuVal: HTMLElement;
   memVal: HTMLElement;
   downloadVal: HTMLElement;
   uploadVal: HTMLElement;
   helperBox: HTMLElement; // helper 行的挂载容器
   iconHolder: HTMLElement;
-  signature: string;      // 上次渲染用的内容指纹，跳过无变化的更新
+  helpers: HelperRefs[];
+  app?: AppRow;
+  highlightQuery?: string;
+  showPid?: boolean;
+  showPorts?: boolean;
+  expanded?: boolean;
+  selected?: boolean;
+}
+
+interface HelperRefs {
+  row: HTMLElement;
+  name: HTMLElement;
+  role: HTMLElement;
+  ports: HTMLElement;
+  pid: HTMLElement;
+  cpu?: HTMLElement;
+  mem?: HTMLElement;
+}
+
+function setText(el: HTMLElement, text: string): void {
+  if (el.textContent !== text) el.textContent = text;
+}
+
+function setHighlightedText(el: HTMLElement, text: string, query: string, queryChanged: boolean): void {
+  if (queryChanged || el.textContent !== text) el.replaceChildren(highlight(text, query));
 }
 
 type RowFocusAction = "expand";
@@ -359,6 +383,7 @@ class ProcKillApp {
   }
 
   private persistSort(): void {
+    this.invalidateVisible();
     if (this.s.cat === "net") {
       this.bridge.setPref(NET_SORT_KEY_PREF_KEY, this.s.sortKey);
       this.bridge.setPref(NET_SORT_DIR_PREF_KEY, this.s.sortDir);
@@ -383,7 +408,6 @@ class ProcKillApp {
 
   private applySortForCategory(cat: CategoryId): void {
     const prefs = this.readSortPrefs(cat);
-    this.invalidateVisible();
     const next = restoreSort(prefs.key, prefs.dir, cat);
     this.s.sortKey = next.key;
     this.s.sortDir = next.dir;
@@ -513,6 +537,7 @@ class ProcKillApp {
       this.rememberSelectionIndex();
       if (networkApps) this.s.networkUsage = new Map(networkApps.map((item) => [processSelectionKey(item.app), item]));
       this.s.list = this.maskKilled(list);
+      this.invalidateVisible();
       this.s.loading = false;
       this.s.loadError = null;
       this.update();
@@ -537,7 +562,6 @@ class ProcKillApp {
       this.scheduleRefresh(delay);
     }
   }
-      this.invalidateVisible();
 
   // ---------- 进程动作 ----------
   private async doKill(app: AppRow): Promise<void> {
@@ -555,6 +579,8 @@ class ProcKillApp {
         // ② 短时遮罩该 id：真实后端进程退出有延迟，接下来一两次刷新仍可能列出它
         this.recentlyKilled.set(app.id, performance.now() + ProcKillApp.KILL_MASK_MS);
         this.s.list = this.s.list.filter((a) => a.id !== app.id);
+        this.s.expanded.delete(app.id);
+        this.invalidateVisible();
         if (this.s.selectedKey === processSelectionKey(app)) this.setSelectedKey(null);
       } else {
         if (isPermissionDenied(res.error)) track("permission.denied", { kind: "kill" });
@@ -579,8 +605,6 @@ class ProcKillApp {
       if (now >= until) this.recentlyKilled.delete(id);
     }
     if (this.recentlyKilled.size === 0) return list;
-        this.s.expanded.delete(app.id);
-        this.invalidateVisible();
     return list.filter((a) => !this.recentlyKilled.has(a.id));
   }
 
@@ -640,6 +664,7 @@ class ProcKillApp {
     // 搜索结果变化后默认选中第一条，避免沿用仍然命中的旧选中项。
     this.setSelectedKey(null);
     this.s.query = restoreQuery(query);
+    this.invalidateVisible();
     this.bridge.setPref(QUERY_PREF_KEY, this.s.query);
     if (this.searchTrackTimer !== null) {
       clearTimeout(this.searchTrackTimer);
@@ -664,12 +689,12 @@ class ProcKillApp {
     this.refreshGridLayout();
     this.setSelectedKey(null);
     this.selectionFallbackIndex = 0;
-    this.invalidateVisible();
     this.s.loading = true;
     this.s.loadError = null;
     // 立刻清掉旧分类数据，否则 update() 会用旧 list 渲染、在新标题下短暂闪现旧分类行；
     // 若随后 load() 失败，旧数据还会永久残留。清空后进入加载态，新数据到了再 diff 填充。
     this.s.list = [];
+    this.invalidateVisible();
     this.s.networkUsage.clear();
     this.clearAllRows();
     this.update();
@@ -694,7 +719,6 @@ class ProcKillApp {
   private toast(msg: string): void {
     let t = document.getElementById("pk-toast");
     if (!t) {
-    this.invalidateVisible();
       t = h("div", { attrs: { id: "pk-toast" }, style: {
         position: "absolute", bottom: "52px", left: "50%", transform: "translateX(-50%)",
         background: "var(--bg-elev)", border: "1px solid var(--border-2)",
@@ -727,6 +751,7 @@ class ProcKillApp {
 
   private setDisplayPref(key: DisplayPrefKey, value: boolean): void {
     this.s[key] = value;
+    this.invalidateVisible();
     this.bridge.setPref(key === "showPid" ? SHOW_PID_PREF_KEY : SHOW_PORTS_PREF_KEY, persistBool(value));
     this.settingsPage.sync({ showPid: this.s.showPid, showPorts: this.s.showPorts });
     this.update();
@@ -751,7 +776,6 @@ class ProcKillApp {
         }
         return;
       }
-    this.invalidateVisible();
       // Tab / Shift+Tab：循环切换可见分组（全局接管，含搜索框与分类按钮焦点）。
       if (e.key === "Tab") {
         e.preventDefault();
@@ -1106,6 +1130,7 @@ class ProcKillApp {
       this.settingsPage.sync({ showPid: s.showPid, showPorts: s.showPorts });
       return;
     }
+    const v = this.visible;
     if (!(s.loading && v.length === 0)) {
       const restored = reconcileSelectionKey(s.selectedKey, v, this.selectionFallbackIndex);
       if (restored !== s.selectedKey) this.setSelectedKey(restored);
@@ -1130,7 +1155,6 @@ class ProcKillApp {
       const key = el.getAttribute("data-key") as SortKey;
       const active = s.sortKey === key;
       el.style.color = active ? "var(--fg-1)" : "var(--fg-3)";
-    const v = this.visible;
       el.setAttribute("aria-sort", active ? (s.sortDir === "asc" ? "ascending" : "descending") : "none");
       el.setAttribute("aria-label", `按${el.textContent?.trim() || "指标"}排序，当前${active ? (s.sortDir === "asc" ? "升序" : "降序") : "未排序"}`);
       const arrow = (el as HTMLElement & { __arrow?: HTMLElement }).__arrow;
@@ -1210,6 +1234,9 @@ class ProcKillApp {
     if (selected) this.scroll.setAttribute("aria-activedescendant", `pk-row-${this.domId(selected.id)}`);
     else this.scroll.removeAttribute("aria-activedescendant");
 
+    const q = searchHighlightQuery(s.query.trim().toLowerCase());
+    const showPorts = portsVisibleOnPage(s.showPorts, s.cat);
+    const { metrics } = layoutForCat(s.cat);
     const wantIds = new Set(v.map((a) => a.id));
 
     // 1) 删除已消失的行
@@ -1219,21 +1246,21 @@ class ProcKillApp {
 
     // 2) 按目标顺序复用/新建，并就地排序
     let prev: HTMLElement | null = null; // 上一个已就位的 wrap
-    v.forEach((a, i) => {
+    for (const a of v) {
       let ref = this.rows.get(a.id);
       if (!ref) {
         ref = this.buildRow(a);
         this.rows.set(a.id, ref);
       }
-      this.updateRow(ref, a, i, s.selectedKey === processSelectionKey(a));
+      this.updateRow(ref, a, q, showPorts, selected === a, metrics);
 
       // 顺序校正：当前 wrap 应紧跟在 prev 之后
-      const shouldFollow = prev ? prev.nextSibling : this.scroll.firstChild;
+      const shouldFollow: ChildNode | null = prev ? prev.nextSibling : this.scroll.firstChild;
       if (ref.wrap !== shouldFollow) {
         this.scroll.insertBefore(ref.wrap, shouldFollow);
       }
       prev = ref.wrap;
-    });
+    }
 
     this.restoreRowFocus(focusSnapshot, v);
 
@@ -1305,7 +1332,7 @@ class ProcKillApp {
       return;
     }
     const ref = this.rows.get(app.id);
-    ref?.caret.focus({ preventScroll: true });
+    if (ref && document.activeElement !== ref.caret) ref.caret.focus({ preventScroll: true });
   }
 
   private rowCellsForLayout(
@@ -1327,7 +1354,7 @@ class ProcKillApp {
 
   // 新建一行（结构骨架，值由 updateRow 填）。
   private buildRow(a: AppRow): RowRefs {
-    const s = this.s;
+    const { id } = a;
     const wrap = h("div", { className: "pk-app-group" });
 
     const caret = h("button", {
@@ -1337,7 +1364,7 @@ class ProcKillApp {
         width: "16px", height: "16px", display: "grid", placeItems: "center",
         border: "none", background: "transparent", cursor: "pointer", padding: "0",
       },
-      on: { click: (e) => { e.stopPropagation(); this.selectById(a.id, false); this.toggleExpand(this.findById(a.id)); } },
+      on: { click: (e) => { e.stopPropagation(); this.selectById(id, false); this.toggleExpand(this.findById(id)); } },
     });
 
     const iconHolder = h("span", { style: { display: "inline-flex" } });
@@ -1346,7 +1373,12 @@ class ProcKillApp {
     const pathLine = h("span", { className: "pk-row-pid", style: { font: "400 12px/16px var(--font-mono)", color: "var(--fg-3)", whiteSpace: "nowrap", flex: "none" } });
     const nameCol = h("div", { className: "pk-row-main", style: { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" }, children: [iconHolder, nameLine, portsLine, pathLine] });
 
-    const procWrap = h("div", { className: "num", style: { textAlign: "right" } });
+    const pathMetric = layoutForCat(this.s.cat).metrics.includes("path");
+    const procVal = h("span", { style: {
+      font: "var(--t-mono-sm)", whiteSpace: "nowrap",
+      ...(pathMetric ? { color: "var(--fg-3)", overflow: "hidden", textOverflow: "ellipsis", display: "block" } : {}),
+    } });
+    const procWrap = h("div", { className: "num", style: { textAlign: pathMetric ? "left" : "right" }, children: [procVal] });
     const cpuVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "right" } });
     const cpuCol = h("div", { style: { textAlign: "right" }, children: [cpuVal] });
     const memVal = h("span", { className: "t-mono", style: { fontSize: "11px", display: "block", textAlign: "right" } });
@@ -1365,8 +1397,8 @@ class ProcKillApp {
         background: "transparent",
       },
       on: {
-        click: () => { this.selectById(a.id); },
-        dblclick: () => this.toggleExpand(this.findById(a.id)),
+        click: () => { this.selectById(id); },
+        dblclick: () => this.toggleExpand(this.findById(id)),
       },
       children: this.rowCellsForLayout(caret, nameCol, procWrap, cpuCol, memCol, downloadCol, uploadCol),
     });
@@ -1376,9 +1408,9 @@ class ProcKillApp {
     wrap.appendChild(helperBox);
 
     return {
-      wrap, row, caret, nameLine, pathLine, portsLine, procWrap,
+      wrap, row, caret, nameLine, pathLine, portsLine, procVal,
       cpuVal, memVal, downloadVal, uploadVal, helperBox, iconHolder,
-      signature: "",
+      helpers: [],
     };
   }
 
@@ -1401,118 +1433,92 @@ class ProcKillApp {
     a: AppRow,
     metrics: readonly MetricCol[],
   ): void {
-    const show = new Set(metrics);
-    const clear = (el: HTMLElement) => { el.replaceChildren(); };
-    if (!show.has("procs") && !show.has("path")) clear(ref.procWrap);
-    else if (show.has("path")) {
-      ref.procWrap.style.textAlign = "left";
-      ref.procWrap.replaceChildren(h("span", {
-        style: {
-          font: "var(--t-mono-sm)", color: "var(--fg-3)", overflow: "hidden", textOverflow: "ellipsis",
-          whiteSpace: "nowrap", display: "block",
-        },
-        text: a.path,
-      }));
-    } else if (show.has("procs")) {
-      ref.procWrap.style.textAlign = "right";
-      if (a.procs > 1) {
-        ref.procWrap.replaceChildren(h("span", {
-          style: { font: "var(--t-mono-sm)", color: "var(--fg-2)", whiteSpace: "nowrap" },
-          text: "×" + a.procs,
-        }));
+    if (metrics.includes("path")) setText(ref.procVal, a.path);
+    if (metrics.includes("procs") && ref.app?.procs !== a.procs) {
+      setText(ref.procVal, `×${a.procs}`);
+      ref.procVal.style.color = a.procs > 1 ? "var(--fg-2)" : "var(--fg-3)";
+    }
+    if (metrics.includes("cpu")) setText(ref.cpuVal, fmtCpu(a.cpu));
+    if (metrics.includes("mem")) setText(ref.memVal, fmtMem(a.mem));
+    if (this.s.cat === "net") {
+      const usage = this.s.networkUsage.get(processSelectionKey(a));
+      setText(ref.downloadVal, usage ? fmtRate(usage.downloadBps) : "采样中");
+      setText(ref.uploadVal, usage ? fmtRate(usage.uploadBps) : "采样中");
+    }
+  }
+
+  private updateRow(ref: RowRefs, a: AppRow, q: string, showPorts: boolean, selected: boolean, metrics: readonly MetricCol[]): void {
+    if (ref.selected !== selected) {
+      ref.selected = selected;
+      ref.row.toggleAttribute("data-sel", selected);
+      ref.wrap.toggleAttribute("data-sel", selected);
+      ref.row.setAttribute("aria-selected", String(selected));
+    }
+
+    const { cat, showPid } = this.s;
+    const canExpand = a.helpers.length > 0;
+    const expanded = canExpand && this.s.expanded.has(a.id);
+    const prev = ref.app;
+    const queryChanged = ref.highlightQuery !== q;
+    if (cat !== "net" && prev === a && !queryChanged && ref.expanded === expanded &&
+        ref.showPid === showPid && ref.showPorts === showPorts) return;
+
+    if (!prev || prev.snapshotToken !== a.snapshotToken) {
+      ref.row.setAttribute("data-selection-key", encodeURIComponent(processSelectionKey(a)));
+    }
+    if (prev && prev.name !== a.name) ref.caret.setAttribute("aria-label", `${a.name} 的子进程`);
+    if (!prev || (prev.helpers.length > 0) !== canExpand || ref.expanded !== expanded) {
+      ref.caret.style.cursor = canExpand ? "pointer" : "default";
+      ref.caret.setAttribute("aria-expanded", String(expanded));
+      ref.caret.disabled = !canExpand;
+      if (canExpand) {
+        ref.caret.replaceChildren(icon(expanded ? "chevron-down" : "chevron-right", 13, { color: "var(--fg-3)" }));
       } else {
-        ref.procWrap.replaceChildren(h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-3)" }, text: "×1" }));
+        ref.caret.replaceChildren();
       }
     }
-    if (show.has("cpu")) {
-      ref.cpuVal.textContent = fmtCpu(a.cpu);
-    } else {
-      ref.cpuVal.textContent = "";
+
+    if (!prev || prev.sys !== a.sys || prev.systemOwned !== a.systemOwned || prev.iconUrl !== a.iconUrl ||
+        (a.iconUrl && prev.name !== a.name)) {
+      ref.iconHolder.replaceChildren(appIcon(a, 18, 5));
     }
-    if (show.has("mem")) {
-      ref.memVal.textContent = fmtMem(a.mem);
-    } else {
-      ref.memVal.textContent = "";
-    }
-    const usage = this.s.networkUsage.get(processSelectionKey(a));
-    ref.downloadVal.textContent = show.has("download") ? (usage ? fmtRate(usage.downloadBps) : "采样中") : "";
-    ref.uploadVal.textContent = show.has("upload") ? (usage ? fmtRate(usage.uploadBps) : "采样中") : "";
+    setHighlightedText(ref.nameLine, a.name, q, queryChanged);
+    const portsText = showPorts ? formatListenPorts(a.ports) : "";
+    setHighlightedText(ref.portsLine, portsText, q, queryChanged);
+    if (ref.portsLine.hidden === !!portsText) ref.portsLine.hidden = !portsText;
+    setHighlightedText(ref.pathLine, showPid ? String(a.pid) : "", q, queryChanged);
+    if (ref.showPid !== showPid) ref.pathLine.hidden = !showPid;
+    this.fillMetricCells(ref, a, metrics);
+    this.updateHelpers(ref, expanded ? a.helpers : [], q, queryChanged, showPid, showPorts);
+    ref.app = a;
+    ref.highlightQuery = q;
+    ref.showPid = showPid;
+    ref.showPorts = showPorts;
+    ref.expanded = expanded;
   }
 
-  // 更新一行的内容（只在指纹变化时改 DOM）。
-  private updateRow(ref: RowRefs, a: AppRow, index: number, selected: boolean): void {
-    const s = this.s;
-    const expanded = s.expanded.has(a.id);
-    ref.row.setAttribute("data-selection-key", encodeURIComponent(processSelectionKey(a)));
-    // 指纹：决定是否需要重绘这一行（含值、选中、展开、量尺基准、图标相关、helper 明细）。
-    // helper 明细必须纳入：展开态下，即便父级聚合值四舍五入后不变，helper 的 pid/cpu/mem 仍可能变。
-    // 图标字段纳入：真实图标异步补上或系统归属变化时要能重画。
-    const q = searchHighlightQuery(s.query.trim().toLowerCase());
-    const sig = [
-      a.cpu, a.mem, a.procs, a.pid, a.name, a.path, (a.ports || []).join(","),
-      s.showPid ? 1 : 0, portsVisibleOnPage(s.showPorts, s.cat) ? 1 : 0,
-      this.s.networkUsage.get(processSelectionKey(a))?.downloadBps ?? "",
-      this.s.networkUsage.get(processSelectionKey(a))?.uploadBps ?? "",
-      a.snapshotToken, (a.allPids || []).join(","),
-      selected ? 1 : 0, expanded ? 1 : 0,
-      a.sys ? 1 : 0, a.systemOwned ? 1 : 0, a.iconUrl || "",
-      q, // 搜索词纳入：改词时已渲染行要重画匹配高亮
-      s.cat,
-      a.helpers.map((hp) => `${hp.pid}:${hp.cpu}:${hp.mem}:${hp.name}:${hp.role}:${(hp.ports || []).join(",")}`).join(","),
-    ].join("|");
-    if (ref.signature === sig) {
-      // 仅选中态可能因键盘移动而频繁变；已包含在 sig，无需额外处理
-      return;
-    }
-    ref.signature = sig;
-
-    // 选中样式由 CSS 驱动（内缩圆角组底）；wrap 的 data-sel 让展开 helper 同组高亮。
-    if (selected) {
-      ref.row.setAttribute("data-sel", "1");
-      ref.wrap.setAttribute("data-sel", "1");
-    } else {
-      ref.row.removeAttribute("data-sel");
-      ref.wrap.removeAttribute("data-sel");
-    }
-    ref.row.setAttribute("aria-selected", selected ? "true" : "false");
-    // 焦点保留在 listbox，通过 aria-activedescendant 表达当前项，避免轮询时焦点跳动。
-    ref.row.tabIndex = -1;
-
-    // 展开箭头
-    const canExpand = a.helpers.length > 0;
-    ref.caret.style.cursor = canExpand ? "pointer" : "default";
-    ref.caret.setAttribute("aria-expanded", expanded ? "true" : "false");
-    ref.caret.disabled = !canExpand;
-    ref.caret.replaceChildren();
-    if (canExpand) {
-      ref.caret.appendChild(icon(expanded ? "chevron-down" : "chevron-right", 13, { color: "var(--fg-3)" } as any));
-    }
-
-    // 图标：仅在视觉相关字段变化时重建，平时复用避免重画。
-    const iconSig = `${a.id}|${a.sys ? 1 : 0}|${a.systemOwned ? 1 : 0}|${a.iconUrl || ""}`;
-    if (!ref.iconHolder.firstChild || ref.iconHolder.getAttribute("data-icon-sig") !== iconSig) {
-      ref.iconHolder.replaceChildren(appIcon(a, a.sys ? 18 : 18, a.sys ? 5 : 5));
-      ref.iconHolder.setAttribute("data-icon-sig", iconSig);
-    }
-
-    const lay = layoutForCat(s.cat);
-    ref.nameLine.replaceChildren(highlight(a.name, q));
-    const portsText = portsVisibleOnPage(s.showPorts, s.cat) ? formatListenPorts(a.ports) : "";
-    ref.portsLine.replaceChildren(highlight(portsText, q));
-    ref.portsLine.hidden = !portsText;
-    ref.pathLine.replaceChildren(highlight(s.showPid ? String(a.pid) : "", q));
-    ref.pathLine.hidden = !s.showPid;
-    this.fillMetricCells(ref, a, lay.metrics);
-
-    // 展开的 Helper 行
-    if (expanded && a.helpers.length) {
-      ref.helperBox.replaceChildren(...a.helpers.map((hp) => this.buildHelperRow(hp, q)));
-    } else {
-      ref.helperBox.replaceChildren();
-    }
+  private updateHelpers(ref: RowRefs, helpers: AppRow["helpers"], q: string, queryChanged: boolean, showPid: boolean, showPorts: boolean): void {
+    while (ref.helpers.length > helpers.length) ref.helpers.pop()!.row.remove();
+    helpers.forEach((helper, i) => {
+      let item = ref.helpers[i];
+      if (!item) {
+        item = this.buildHelperRow();
+        ref.helpers.push(item);
+        ref.helperBox.appendChild(item.row);
+      }
+      setHighlightedText(item.name, helper.name, q, queryChanged);
+      setText(item.role, helper.role);
+      const ports = showPorts ? formatListenPorts(helper.ports) : "";
+      setHighlightedText(item.ports, ports, q, queryChanged);
+      if (item.ports.hidden === !!ports) item.ports.hidden = !ports;
+      setHighlightedText(item.pid, showPid ? String(helper.pid) : "", q, queryChanged);
+      if (item.pid.hidden === showPid) item.pid.hidden = !showPid;
+      if (item.cpu) setText(item.cpu, fmtCpu(helper.cpu));
+      if (item.mem) setText(item.mem, fmtMem(helper.mem));
+    });
   }
 
-  private buildHelperRow(hp: AppRow["helpers"][number], q: string): HTMLElement {
+  private buildHelperRow(): HelperRefs {
     const hr = h("div", {
       className: "pk-helper-row",
       style: {
@@ -1526,32 +1532,23 @@ class ProcKillApp {
     });
     cell.appendChild(h("span", { style: { position: "absolute", left: "5px", top: "-12px", width: "1px", height: "24px", background: "var(--border-2)" } }));
     cell.appendChild(h("span", { style: { position: "absolute", left: "5px", top: "12px", width: "9px", height: "1px", background: "var(--border-2)" } }));
-    const hName = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } });
-    hName.appendChild(highlight(hp.name, q));
-    cell.appendChild(hName);
-    cell.appendChild(h("span", { style: { font: "var(--t-xs)", color: "var(--fg-3)", padding: "0 5px", borderRadius: "4px", background: "var(--bg-elev)", whiteSpace: "nowrap", flex: "none" }, text: hp.role }));
-    const helperPorts = portsVisibleOnPage(this.s.showPorts, this.s.cat) ? formatListenPorts(hp.ports) : "";
-    if (helperPorts) {
-      const ports = h("span", { className: "pk-row-ports", style: { whiteSpace: "nowrap", flex: "none" } });
-      ports.appendChild(highlight(helperPorts, q));
-      cell.appendChild(ports);
-    }
-    if (this.s.showPid) {
-      const pid = h("span", { className: "pk-row-pid", style: { font: "400 12px/16px var(--font-mono)", color: "var(--fg-3)", whiteSpace: "nowrap", flex: "none" } });
-      pid.appendChild(highlight(String(hp.pid), q));
-      cell.appendChild(pid);
-    }
+    const name = h("span", { style: { font: "var(--t-mono-sm)", color: "var(--fg-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } });
+    const role = h("span", { style: { font: "var(--t-xs)", color: "var(--fg-3)", padding: "0 5px", borderRadius: "4px", background: "var(--bg-elev)", whiteSpace: "nowrap", flex: "none" } });
+    const ports = h("span", { className: "pk-row-ports", style: { whiteSpace: "nowrap", flex: "none" } });
+    const pid = h("span", { className: "pk-row-pid", style: { font: "400 12px/16px var(--font-mono)", color: "var(--fg-3)", whiteSpace: "nowrap", flex: "none" } });
+    cell.append(name, role, ports, pid);
     hr.appendChild(cell);
-    for (const m of layoutForCat(this.s.cat).metrics) {
-      if (m === "cpu") {
-        hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "right" }, text: fmtCpu(hp.cpu) }));
-      } else if (m === "mem") {
-        hr.appendChild(h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "right" }, text: fmtMem(hp.mem) }));
+    const ref: HelperRefs = { row: hr, name, role, ports, pid };
+    for (const metric of layoutForCat(this.s.cat).metrics) {
+      if (metric === "cpu" || metric === "mem") {
+        const value = h("span", { className: "t-mono", style: { fontSize: "11px", color: "var(--fg-3)", textAlign: "right" } });
+        ref[metric] = value;
+        hr.appendChild(value);
       } else {
         hr.appendChild(h("span"));
       }
     }
-    return hr;
+    return ref;
   }
 
   async start(): Promise<void> {
