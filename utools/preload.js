@@ -100,9 +100,11 @@ function isGraphicalApp(exe) {
    macOS：定位 .app bundle → 读 Info.plist 的 CFBundleIconFile（PlistBuddy）→ sips 转
           64×64 PNG → base64 data URL，交前端 <img> 显示真实图标；失败缓存 null 降级字形方块。
    Windows / Linux：暂未实现真实抓取，缓存 null 降级。
-   缓存按 bundle/exe 路径去重，含「已失败」负缓存，避免每次刷新重复跑 sips（开销大）。 */
+   缓存按应用包路径去重，含「已失败」负缓存，避免每次刷新重复跑 sips（开销大）。 */
 const fs = require("node:fs");
-const ICON_CACHE = new Map(); // path -> data URL | null（null=已尝试且失败）
+const ICON_CACHE_LIMIT = 256;
+const ICON_CACHE = new Map(); // bundle -> data URL | null（null=已尝试且失败）
+const ICON_REQUESTS = new Map();
 
 function bundleRootMac(p) {
   if (!p) return null;
@@ -134,8 +136,7 @@ async function locateIcns(bundle) {
   return null;
 }
 
-// 临时文件名唯一序号：缓存检查与抓取之间存在窗口，同一 icns 可能被并发抓取两次，
-// 唯一序号保证各写各的临时文件，避免并发 sips 写同一文件互相污染读到半截 PNG。
+// 不同应用包可能同时转换，唯一序号避免临时输出互相覆盖。
 let TMP_SEQ = 0;
 
 // 用系统 sips 把 .icns 转 64×64 PNG 临时文件，读回 base64（sips 不支持写 stdout）。
@@ -158,21 +159,29 @@ function simpleHash(s) {
   return h.toString(36);
 }
 
-// 取一个应用路径的真实图标 data URL，命中缓存（含负缓存）即返回。失败返回 null。
+// 以应用包路径去重，复用同一次图标转换。只保留最近使用的图标和失败记录。
 async function iconDataUrl(appPath) {
-  if (!appPath) return null;
-  if (ICON_CACHE.has(appPath)) return ICON_CACHE.get(appPath);
-  let result = null;
-  if (IS_MAC) {
-    const bundle = bundleRootMac(appPath);
-    if (bundle) {
-      const icns = await locateIcns(bundle);
-      if (icns) result = await icnsToDataUrl(icns);
-    }
+  const bundle = bundleRootMac(appPath);
+  if (!bundle) return null;
+  if (ICON_CACHE.has(bundle)) {
+    const cached = ICON_CACHE.get(bundle);
+    ICON_CACHE.delete(bundle);
+    ICON_CACHE.set(bundle, cached);
+    return cached;
   }
-  // Windows 可用 win-icon-extractor，Linux 解析 .desktop + 主题图标（后续）。
-  ICON_CACHE.set(appPath, result);
-  return result;
+  const pending = ICON_REQUESTS.get(bundle);
+  if (pending) return pending;
+
+  const request = locateIcns(bundle)
+    .then((icns) => icns ? icnsToDataUrl(icns) : null)
+    .then((result) => {
+      ICON_CACHE.set(bundle, result);
+      if (ICON_CACHE.size > ICON_CACHE_LIMIT) ICON_CACHE.delete(ICON_CACHE.keys().next().value);
+      return result;
+    })
+    .finally(() => ICON_REQUESTS.delete(bundle));
+  ICON_REQUESTS.set(bundle, request);
+  return request;
 }
 
 // 给一批行并发补充真实图标（仅 GUI/非 sys 行；sys 行用字形方块即可）。
