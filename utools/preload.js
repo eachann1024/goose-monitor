@@ -451,10 +451,17 @@ function descendantsUnix(rootPids, raw) {
 }
 
 async function killProcess(id, snapshotToken, pids) {
+  if (typeof id !== "string" || !id || typeof snapshotToken !== "string" || !snapshotToken || !Array.isArray(pids)) {
+    return { ok: false, killed: [], error: "无效的进程参数" };
+  }
+  const expected = new Set(pids.filter((p) => Number.isInteger(p) && p > 1));
+  if (!expected.size) {
+    return { ok: false, killed: [], error: "无效的 PID 列表" };
+  }
+
   const SELF = process.pid;
   const raw = await rawProcs();
   const current = merge(raw).find((row) => row.id === id && row.snapshotToken === snapshotToken);
-  const expected = new Set(Array.isArray(pids) ? pids : []);
 
   // 保护 uTools/Codex 宿主链：结束任一祖先都可能连带关闭当前插件。
   const byPid = new Map(raw.map((p) => [p.pid, p]));
@@ -490,6 +497,7 @@ async function killProcess(id, snapshotToken, pids) {
       return true;
     });
     for (const p of roots) {
+      if (!Number.isInteger(p) || p <= 1) continue;
       try {
         // taskkill /T 递归杀进程树（异步，不阻塞事件循环）
         await execFileAsync("taskkill", ["/T", "/F", "/PID", String(p)], { stdio: "ignore" });

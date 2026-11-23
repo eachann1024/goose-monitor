@@ -3,7 +3,7 @@
    用法：bun run build:utools（会先 vite build --mode utools） */
 import { cpSync, mkdirSync, rmSync, existsSync, copyFileSync, writeFileSync, readdirSync, unlinkSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, "..");
@@ -34,8 +34,8 @@ for (const file of readdirSync(resolve(dist, "assets"))) {
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 
-// 1. 拷贝前端构建产物
-cpSync(dist, out, { recursive: true });
+// 1. 拷贝前端构建产物（排除 .DS_Store）
+cpSync(dist, out, { recursive: true, filter: (src) => basename(src) !== ".DS_Store" });
 
 // 1b. 正式发布剥离 sourcemap（debug 构建保留）
 if (!isDebug) {
