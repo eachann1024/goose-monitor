@@ -11,3 +11,13 @@ utools-dist/
 .design-check/
 
 未命名/
+
+# Added by maotou cleanup
+tmp/
+.cache/
+*.tmp
+*.dump
+*.har
+debug*
+*.debug
+*.trace
